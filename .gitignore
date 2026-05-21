@@ -17,6 +17,7 @@ forge/*.log
 
 # Benchmark scratch (agents write here per experiment, reset between runs)
 benchmarks/*/.valinor/
+benchmarks/*/.opencode/
 benchmarks/*/src/
 benchmarks/*/bin/
 benchmarks/*/tests/*.test.js

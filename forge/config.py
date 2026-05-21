@@ -7,6 +7,7 @@ forbidden from editing this file (`program.md` enforces that boundary).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -17,6 +18,12 @@ ROLES: tuple[Role, ...] = ("planner", "generator", "validator")
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _env_model(default: str) -> str:
+    """Env override for the experiment model. Useful when LM Studio has a
+    different model loaded than the config default."""
+    return os.environ.get("FORGE_EXPERIMENT_MODEL", default)
 
 
 @dataclass(frozen=True)
@@ -48,7 +55,9 @@ class ForgeConfig:
     # ───── models
     # The local agent that drives planner/generator/validator. opencode receives
     # this as the -m argument (provider/model form). Must be loaded in LM Studio.
-    experiment_model: str = "lmstudio/openai/gpt-oss-20b"
+    # Override via FORGE_EXPERIMENT_MODEL env var when a different model is
+    # currently loaded (LM Studio doesn't auto-swap with our 16GB budget).
+    experiment_model: str = field(default_factory=lambda: _env_model("lmstudio/openai/gpt-oss-20b"))
 
     # Cloud model for the proposer (mutation generator) and judge (rubric scorer).
     anthropic_model: str = "claude-opus-4-7"

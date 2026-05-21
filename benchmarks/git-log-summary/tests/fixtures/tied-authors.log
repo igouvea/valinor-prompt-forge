@@ -1,0 +1,17 @@
+commit 1111111111111111111111111111111111111111
+Author: Charlie Chaplin <charlie@example.com>
+Date:   Wed May 14 09:00:00 2026 +0000
+
+    Fix typo
+
+commit 2222222222222222222222222222222222222222
+Author: Bob Builder <bob@example.com>
+Date:   Tue May 13 09:00:00 2026 +0000
+
+    Add config loader
+
+commit 3333333333333333333333333333333333333333
+Author: Alice Liddell <alice@example.com>
+Date:   Mon May 12 09:00:00 2026 +0000
+
+    Bootstrap project

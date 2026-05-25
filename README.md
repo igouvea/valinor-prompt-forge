@@ -15,7 +15,7 @@ This project applies [Karpathy's autoresearch pattern](https://github.com/karpat
 
 > Fix the eval. Fix the model. Mutate the prompt. Score. Keep what improves. Loop overnight.
 
-Inner loop (every experiment) runs locally on LM Studio (gpt-oss-20b by default) — **zero cloud tokens**. Outer loop calls Opus 4.7 twice per experiment: once to propose the next prompt mutation, once to grade artifact quality. Cost target: under $30 / overnight run.
+Everything runs through an **already-authenticated agentic CLI** — `claude` by default (your subscription/OAuth, **no `ANTHROPIC_API_KEY`**), or `codex` for GPT models. Toggle one per run. The inner-loop agents run at the Top tier (Opus-class) so the prompts are tuned for the model Valinor actually deploys; the same `claude` CLI at Opus does the two outer-loop reasoning calls (propose a mutation, grade artifacts).
 
 ## How it works
 
@@ -24,14 +24,14 @@ proposer (Opus xhigh) → writes prompts/champion/{planner,generator,validator}.
         ↓
 for each benchmark:
     reset benchmark scratch dir
-    spawn opencode + lmstudio/openai/gpt-oss-20b for each role
+    spawn the authed CLI (claude/codex) for each role, tools scoped to the dir
     capture artifacts (spec.md, build-report.md, validation.md)
     run vitest → pass/fail count
     record cycle count
         ↓
 judge (Opus) → grades artifacts vs rubric (per-criterion JSON)
         ↓
-scorer → combined: 0.5·test_pass + 0.2·(1/cycles) + 0.3·rubric
+scorer → combined: 0.5·held_out_test_pass + 0.2·time_efficiency + 0.3·rubric
         ↓
 ratchet: score > champion ? adopt : discard
         ↓
@@ -69,9 +69,8 @@ progress.md                   — human-readable summary, regenerated each cycle
 
 **Prerequisites:**
 - Python 3.10+, [uv](https://docs.astral.sh/uv/)
-- Node 20+, `opencode` CLI (`npm install -g opencode`)
-- LM Studio running locally with `openai/gpt-oss-20b` loaded
-- `ANTHROPIC_API_KEY` env var set
+- Node 20+ (benchmarks run `npm test` / vitest)
+- An authed agentic CLI — `claude` (default; logged in via your subscription) or `codex`. **No API key.**
 - Valinor checked out as sibling: `../valinor/`
 
 ```bash

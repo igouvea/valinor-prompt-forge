@@ -1,32 +1,31 @@
 """
 forge.judge
 
-Cloud-side rubric scoring. Given an ExperimentResult's artifacts, ask Opus to
-grade each role on a fixed set of criteria, then return a normalized [0,1]
-score for the rubric channel of the multi-metric score.
+Rubric scoring via the authed `claude` CLI (no API key). Given an
+ExperimentResult's artifacts, ask Opus to grade each role on a fixed set of
+criteria, then return a normalized [0,1] score for the rubric channel of the
+multi-metric score.
 
 The rubric is operator-visible in this file. Edit RUBRIC to change what good
 looks like — this is the "what's the proposer optimizing for" knob beyond the
-hard test-pass-rate signal. The rationale per criterion is preserved in the
-experiment journal so future proposer calls can learn from it.
+hard test-pass-rate signal. Per-criterion rationale is preserved in the journal
+so future proposer calls can learn from it.
 
-This module DOES call Anthropic (Opus by default — see CONFIG). Tokens cost
-roughly $0.20 per experiment (input ~10K artifact tokens + ~1K reasoning
-output). Skip it during dry-runs by passing call_anthropic=False to score()
-— it'll return rubric_score=0.5 with a placeholder rationale.
+This calls the model (Opus by default — CONFIG.researcher_model) once per
+benchmark. Skip it during dry-runs with call_judge=False — it returns a neutral
+zero rubric with a placeholder rationale.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Any
 
-from anthropic import Anthropic
-
 from .config import CONFIG, ROLES, Role
+from .agent_cli import run_researcher
 from .experiment import BenchmarkResult, ExperimentResult
 
 
@@ -118,12 +117,14 @@ class RubricResult:
     roles: list[RoleScore]
     overall: float  # 0..1, mean of role averages
     rationale: str  # judge's overall paragraph
+    cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "benchmark": self.benchmark,
             "overall": self.overall,
             "rationale": self.rationale,
+            "cost_usd": self.cost_usd,
             "roles": [
                 {"role": r.role, "average": r.average,
                  "criteria": [asdict(c) for c in r.criteria]}
@@ -133,7 +134,7 @@ class RubricResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Anthropic call
+# Prompt construction
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -175,7 +176,6 @@ def _build_user_payload(bench: BenchmarkResult) -> str:
                 for c in crit
             ],
         }
-        # Find the role's artifact + final message in the benchmark result.
         role_data = next((r for r in bench.roles if r.role == role), None)
         artifact = (role_data.artifact if role_data and role_data.artifact else "(empty / not written)")
         final = (role_data.final_message if role_data and role_data.final_message else "(no final message)")
@@ -184,7 +184,6 @@ def _build_user_payload(bench: BenchmarkResult) -> str:
             f"### {role.upper()} final assistant message\n```\n{final}\n```"
         )
 
-    # Objective grounding for verdict_correctness: include the actual test outcome.
     test_summary = (
         f"Benchmark: {bench.benchmark}\n"
         f"Cycles: {bench.cycles}\n"
@@ -226,7 +225,7 @@ def _parse_judge_response(text: str) -> dict[str, Any]:
 
 
 def _empty_rubric(bench: BenchmarkResult, reason: str) -> RubricResult:
-    """Used when judge is skipped or fails — gives a neutral 0.5 score."""
+    """Used when the judge is skipped or fails — gives a neutral zero score."""
     roles = [
         RoleScore(
             role=role,
@@ -238,39 +237,7 @@ def _empty_rubric(bench: BenchmarkResult, reason: str) -> RubricResult:
     return RubricResult(benchmark=bench.benchmark, roles=roles, overall=0.0, rationale=reason)
 
 
-def score_benchmark(bench: BenchmarkResult, *, call_anthropic: bool = True) -> RubricResult:
-    """Grade one benchmark's artifacts. Returns a normalized [0,1] overall."""
-    if not call_anthropic:
-        return _empty_rubric(bench, "judge skipped (call_anthropic=False)")
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return _empty_rubric(bench, "ANTHROPIC_API_KEY not set; judge skipped")
-
-    client = Anthropic(api_key=api_key)
-    try:
-        resp = client.messages.create(
-            model=CONFIG.anthropic_model,
-            max_tokens=4096,
-            thinking={"type": "enabled", "budget_tokens": CONFIG.anthropic_thinking_budget},
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _build_user_payload(bench)}],
-        )
-    except Exception as e:
-        return _empty_rubric(bench, f"judge call failed: {e}")
-
-    # Find the assistant text part (Opus returns thinking + text blocks).
-    text_parts: list[str] = []
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            text_parts.append(block.text)
-    raw = "\n".join(text_parts)
-
-    try:
-        data = _parse_judge_response(raw)
-    except Exception as e:
-        return _empty_rubric(bench, f"judge response unparseable: {e}")
-
+def _assemble(bench: BenchmarkResult, data: dict[str, Any], cost: float) -> RubricResult:
     roles_data = data.get("roles") or {}
     role_scores: list[RoleScore] = []
     for role in ROLES:
@@ -293,7 +260,6 @@ def score_benchmark(bench: BenchmarkResult, *, call_anthropic: bool = True) -> R
                     rationale=str(raw_c.get("rationale", "")).strip()[:280],
                 )
             )
-        # Per-role average normalized to [0,1].
         avg = (sum(c.score for c in criterion_scores) / (3 * len(crit_defs))) if crit_defs else 0.0
         role_scores.append(RoleScore(role=role, criteria=criterion_scores, average=avg))
 
@@ -303,12 +269,44 @@ def score_benchmark(bench: BenchmarkResult, *, call_anthropic: bool = True) -> R
         roles=role_scores,
         overall=overall,
         rationale=str(data.get("overall_rationale", "")).strip(),
+        cost_usd=cost,
     )
 
 
-def score_experiment(exp: ExperimentResult, *, call_anthropic: bool = True) -> tuple[float, list[RubricResult]]:
-    """Score every benchmark in the experiment. Returns (mean_overall, per_benchmark_rubrics)."""
-    rubrics = [score_benchmark(b, call_anthropic=call_anthropic) for b in exp.benchmarks]
+# ─────────────────────────────────────────────────────────────────────────────
+# Public
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def score_benchmark(bench: BenchmarkResult, *, log_dir: Path, call_judge: bool = True) -> RubricResult:
+    """Grade one benchmark's artifacts. Returns a normalized [0,1] overall."""
+    if not call_judge:
+        return _empty_rubric(bench, "judge skipped (call_judge=False)")
+
+    sp_file = log_dir / f"judge.{bench.benchmark}.system.txt"
+    log_path = log_dir / f"judge.{bench.benchmark}.log"
+    run = run_researcher(
+        system_prompt=_SYSTEM_PROMPT,
+        user_message=_build_user_payload(bench),
+        sys_prompt_file=sp_file,
+        log_path=log_path,
+    )
+    if run.is_error or not run.final_text:
+        return _empty_rubric(bench, f"judge call failed: {run.error or 'empty response'}")
+    try:
+        data = _parse_judge_response(run.final_text)
+    except Exception as e:
+        return _empty_rubric(bench, f"judge response unparseable: {e}")
+    return _assemble(bench, data, run.cost_usd)
+
+
+def score_experiment(
+    exp: ExperimentResult, *, log_dir: Path | None = None, call_judge: bool = True
+) -> tuple[float, list[RubricResult]]:
+    """Score every benchmark. Returns (mean_overall, per_benchmark_rubrics)."""
+    log_dir = log_dir or (CONFIG.runs_dir / exp.exp_id)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    rubrics = [score_benchmark(b, log_dir=log_dir, call_judge=call_judge) for b in exp.benchmarks]
     if not rubrics:
         return 0.0, []
     mean = sum(r.overall for r in rubrics) / len(rubrics)

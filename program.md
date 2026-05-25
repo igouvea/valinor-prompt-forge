@@ -8,12 +8,16 @@ Drive the **multi-metric weighted score** as high as possible across all three b
 
 ```
 score = 0.5 · test_pass_rate
-      + 0.2 · (1 / max(1, total_cycles))
+      + 0.2 · time_efficiency
       + 0.3 · rubric_score
 ```
 
-- `test_pass_rate`: fraction of benchmark vitest tests passing (0..1)
-- `total_cycles`: sum of generator↔validator rework rounds across all 3 benchmarks (lower is better)
+- `test_pass_rate`: fraction of the HELD-OUT golden tests passing (0..1) —
+  authored by the benchmark designer, never seen by the agents, so this is true
+  correctness, not the generator's self-tests.
+- `time_efficiency`: `ref / (ref + mean_benchmark_wall_seconds)` — rewards
+  reaching a correct result in less wall-clock time (a tighter, less-wandering
+  prompt). It is about TIME, not the number of rework iterations.
 - `rubric_score`: Opus judge's rubric average (0..1)
 
 A perfect run is `score = 1.0`.

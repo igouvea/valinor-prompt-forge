@@ -7,21 +7,23 @@ Formula (weights live in CONFIG.weights, edit program.md to change the
 research-org policy, edit config.py to change the math itself):
 
     score = w_tests  * aggregate_pass_rate
-          + w_cycles * cycle_efficiency
+          + w_speed  * time_efficiency
           + w_rubric * rubric_score
 
 where:
-    aggregate_pass_rate  ∈ [0,1] — fraction of benchmark tests passing
+    aggregate_pass_rate  ∈ [0,1] — fraction of held-out golden tests passing
                                    (averaged across benchmarks)
-    cycle_efficiency     ∈ [0,1] — 1 / max(1, total_cycles)
-                                   (1.0 means single-pass clear on every bench)
+    time_efficiency      ∈ (0,1] — ref / (ref + mean_benchmark_wall_seconds);
+                                   rewards agents that reach a correct result
+                                   FASTER (less wandering), not fewer nominal
+                                   rework cycles
     rubric_score         ∈ [0,1] — Opus judge's normalized rubric average
 
-A perfect run is 1.0. The seed/baseline score is whatever the current Valinor
-prompts achieve against the benchmarks on the local model.
+A perfect, instant run approaches 1.0. The baseline score is whatever the
+current Valinor prompts achieve against the benchmarks on the chosen model.
 
 This module is pure functions. No I/O, no LLM calls. judge.py supplies the
-rubric_score input.
+rubric_score input; experiment.py supplies the timing.
 """
 
 from __future__ import annotations
@@ -38,14 +40,20 @@ class Score:
 
     total: float
     tests: float           # aggregate test pass rate
-    cycles: float          # cycle efficiency (1/cycles)
+    speed: float           # time efficiency (ref/(ref+seconds))
     rubric: float          # judge's rubric score
-    raw_total_cycles: int  # for display
+    raw_wall_seconds: float  # mean per-benchmark agent wall seconds (display)
+    raw_total_cycles: int    # nominal rework cycles (display only, not scored)
 
 
-def cycle_efficiency(total_cycles: int) -> float:
-    """1.0 for single-pass-success-everywhere, decreasing as rework piles on."""
-    return 1.0 / max(1, total_cycles)
+def time_efficiency(mean_benchmark_seconds: float, ref_seconds: float | None = None) -> float:
+    """Smooth speed score in (0,1]. 0.5 when a benchmark takes `ref` seconds,
+    → 1.0 as it gets faster, → 0 as it slows. Monotonic, so there is always
+    pressure toward faster runs (unlike a hard cap)."""
+    ref = ref_seconds if ref_seconds is not None else CONFIG.time_ref_seconds
+    ref = max(1e-6, ref)
+    seconds = max(0.0, mean_benchmark_seconds)
+    return ref / (ref + seconds)
 
 
 def compute_score(experiment: ExperimentResult, rubric_score: float) -> Score:
@@ -56,14 +64,16 @@ def compute_score(experiment: ExperimentResult, rubric_score: float) -> Score:
     """
     rubric_score = max(0.0, min(1.0, rubric_score))
     test_rate = experiment.aggregate_pass_rate
-    cyc = cycle_efficiency(experiment.total_cycles)
+    mean_seconds = experiment.mean_benchmark_wall_seconds
+    spd = time_efficiency(mean_seconds)
     w = CONFIG.weights
-    total = w.tests * test_rate + w.cycles * cyc + w.rubric * rubric_score
+    total = w.tests * test_rate + w.speed * spd + w.rubric * rubric_score
     return Score(
         total=total,
         tests=test_rate,
-        cycles=cyc,
+        speed=spd,
         rubric=rubric_score,
+        raw_wall_seconds=mean_seconds,
         raw_total_cycles=experiment.total_cycles,
     )
 

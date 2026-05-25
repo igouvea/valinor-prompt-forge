@@ -8,10 +8,9 @@ wheels/
 .venv/
 uv.lock
 
-# Forge runtime state
-state/runs/
-state/live.json
-state/lock
+# Forge runtime state (journal, live snapshot, run logs, archives, backups)
+state/
+progress.md
 forge/*.log
 *.tmp.log
 

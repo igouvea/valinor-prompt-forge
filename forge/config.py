@@ -3,6 +3,11 @@ Forge configuration.
 
 Operator-tunable knobs live here. Edit values directly. The proposer is
 forbidden from editing this file (`program.md` enforces that boundary).
+
+Auth model: everything runs through an already-authenticated agentic CLI
+(`claude` by default, OAuth/subscription — NO ANTHROPIC_API_KEY needed; or
+`codex` for GPT models). The inner-loop agents and the outer-loop researcher
+(proposer + judge) are all CLI subprocesses. See forge/agent_cli.py.
 """
 
 from __future__ import annotations
@@ -16,26 +21,41 @@ from typing import Literal
 Role = Literal["planner", "generator", "validator"]
 ROLES: tuple[Role, ...] = ("planner", "generator", "validator")
 
+# Which authed CLI drives the inner-loop agents. Toggle one per run (not both
+# in parallel). "claude" → Anthropic models via OAuth; "codex" → OpenAI/GPT via
+# the ChatGPT subscription.
+AgentCli = Literal["claude", "codex"]
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _env_model(default: str) -> str:
-    """Env override for the experiment model. Useful when LM Studio has a
-    different model loaded than the config default."""
-    return os.environ.get("FORGE_EXPERIMENT_MODEL", default)
+def _env(name: str, default: str) -> str:
+    return os.environ.get(name, default)
 
 
 @dataclass(frozen=True)
 class ScoreWeights:
-    """Multi-metric weighted score: w_tests*test_pass + w_cycles*(1/cycles) + w_rubric*rubric."""
+    """Multi-metric weighted score: w_tests*test_pass + w_speed*time_efficiency + w_rubric*rubric.
+
+    The efficiency channel is TIME-based (wall-clock seconds the agents spent),
+    not iteration count — what matters is how fast the agents reach a correct
+    result, not how many rework rounds they nominally took (which is ~always 1
+    on single-pass tasks). A prompt that gets the agent there with less wandering
+    is faster on both cloud and local models.
+
+    NOTE: at the Top/Opus tier a strong model produces decent output even from a
+    mediocre prompt, compressing the test-pass channel. If the loop stalls for
+    lack of gradient, lean toward the rubric (e.g. tests=0.4, speed=0.1,
+    rubric=0.5). These weights must sum to 1.0.
+    """
 
     tests: float = 0.5
-    cycles: float = 0.2
+    speed: float = 0.2
     rubric: float = 0.3
 
     def __post_init__(self) -> None:
-        total = self.tests + self.cycles + self.rubric
+        total = self.tests + self.speed + self.rubric
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"ScoreWeights must sum to 1.0, got {total}")
 
@@ -51,34 +71,61 @@ class ForgeConfig:
     runs_dir: Path = REPO_ROOT / "state" / "runs"
     experiments_jsonl: Path = REPO_ROOT / "state" / "experiments.jsonl"
     live_json: Path = REPO_ROOT / "state" / "live.json"
+    progress_md: Path = REPO_ROOT / "progress.md"
 
-    # ───── models
-    # The local agent that drives planner/generator/validator. opencode receives
-    # this as the -m argument (provider/model form). Must be loaded in LM Studio.
-    # Override via FORGE_EXPERIMENT_MODEL env var when a different model is
-    # currently loaded (LM Studio doesn't auto-swap with our 16GB budget).
-    experiment_model: str = field(default_factory=lambda: _env_model("lmstudio/openai/gpt-oss-20b"))
+    # Valinor checkout (sibling dir) — promote target. The three BASE_ROLE
+    # prompts live inside this TS file.
+    valinor_repo: Path = REPO_ROOT.parent / "valinor"
+    valinor_harness_file: Path = REPO_ROOT.parent / "valinor" / "src" / "runtime" / "agents" / "codexHarness.ts"
 
-    # Cloud model for the proposer (mutation generator) and judge (rubric scorer).
-    anthropic_model: str = "claude-opus-4-7"
-    anthropic_thinking_budget: int = 10000  # "xhigh" extended thinking
+    # ───── inner-loop agent driver
+    # Toggle which authed CLI runs planner/generator/validator.
+    agent_cli: AgentCli = field(default_factory=lambda: _env("FORGE_AGENT_CLI", "claude"))  # type: ignore[assignment]
+    # Top-tier model per CLI (operator chose "Top / Opus-class").
+    agent_model_claude: str = field(default_factory=lambda: _env("FORGE_CLAUDE_MODEL", "opus"))
+    # codex's top coding model. VERIFY on first codex run; override via env.
+    agent_model_codex: str = field(default_factory=lambda: _env("FORGE_CODEX_MODEL", "gpt-5.1-codex"))
+    # Tools the inner-loop agents may use (claude --allowedTools). Coding only —
+    # MCP servers are stripped entirely (see agent_cli.py).
+    agent_allowed_tools: tuple[str, ...] = ("Bash", "Edit", "Write", "Read", "Glob", "Grep")
+    # USD-equivalent failsafe per role-run, in case an agent runs away. On a
+    # subscription this just caps the equivalent spend; the wall-clock timeout
+    # is the real backstop.
+    agent_max_budget_usd: float = 4.0
+
+    # ───── outer-loop researcher (proposer + judge)
+    # Always the claude CLI at the strongest reasoning model. This is the
+    # "scientist" — mutating prompts and grading artifacts.
+    researcher_model: str = field(default_factory=lambda: _env("FORGE_RESEARCHER_MODEL", "opus"))
 
     # ───── experiment shape
-    benchmarks: tuple[str, ...] = ("git-log-summary",)
-    # Once react-form-validation + csv-to-json benchmarks exist, expand:
-    # benchmarks = ("git-log-summary", "react-form-validation", "csv-to-json")
+    # The hard slate: held-out golden tests (golden/<name>/) measure true
+    # correctness, so even a strong model lands well below 1.0 — leaving the
+    # optimizer real headroom. git-log-summary is retired (self-tests saturate
+    # it to 1.0); keep it available via FORGE_BENCHMARKS override if needed.
+    benchmarks: tuple[str, ...] = field(default_factory=lambda: tuple(
+        os.environ.get("FORGE_BENCHMARKS", "json-patch,expr-eval,task-api").split(",")
+    ))
 
-    # Per-role timeout for the opencode subprocess (wall clock seconds). Failsafe
-    # against an agent that gets stuck and never exits cleanly.
+    # Per-role wall-clock timeout for the agent subprocess (seconds). Failsafe
+    # against an agent that gets stuck and never exits.
     role_timeout_s: int = 30 * 60  # 30 min per role
 
-    # Max validator→generator rework rounds per benchmark. 1 means: planner runs
-    # once, generator runs once, validator runs once. If validator FAILs, the
-    # cycle is over (counts toward score via cycles). Raise to allow retries.
+    # Max validator→generator rework rounds per benchmark. 1 means: planner once,
+    # generator once, validator once. If validator FAILs, the cycle is over.
     max_rework_rounds: int = 1
 
     # ───── scoring
     weights: ScoreWeights = field(default_factory=ScoreWeights)
+    # Time reference for the speed channel (per-benchmark agent wall seconds).
+    # time_efficiency = ref / (ref + mean_benchmark_seconds): equals 0.5 when a
+    # benchmark takes `ref` seconds, → 1.0 as it gets faster, → 0 as it slows.
+    # Calibrate to the observed baseline so the champion sits near 0.5 and has
+    # headroom in BOTH directions. Override via FORGE_TIME_REF_SECONDS.
+    # Calibrated from the exp-0009 Opus baseline (~535s/benchmark) so the
+    # champion sits near speed 0.5 with headroom both ways. Re-tune if the
+    # agent model or benchmark set changes.
+    time_ref_seconds: float = field(default_factory=lambda: float(_env("FORGE_TIME_REF_SECONDS", "540")))
 
     # ───── stop condition (forge run)
     stop_score_threshold: float = 0.95
@@ -87,6 +134,10 @@ class ForgeConfig:
     # ───── dashboard
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 7777
+
+    def agent_model(self) -> str:
+        """Model id for the currently-toggled inner-loop CLI."""
+        return self.agent_model_codex if self.agent_cli == "codex" else self.agent_model_claude
 
 
 CONFIG = ForgeConfig()

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { summarize } from '../src/summarize.js';
+import { summarize, format } from '../src/summarize.js';
 
 describe('summarize', () => {
   it('should return zero commits and empty authors for empty input', () => {
@@ -56,5 +56,51 @@ describe('summarize', () => {
     expect(result.mostRecent.hash).toBe('1111111111111');
     expect(result.mostRecent.author).toBe('Charlie Chaplin');
     expect(result.mostRecent.subject).toBe('Fix typo');
+  });
+});
+
+describe('format', () => {
+  it('should format summary output with multiple authors', () => {
+    const summary = {
+      totalCommits: 3,
+      authors: new Map([['Jane Doe', 2], ['John Smith', 1]]),
+      mostRecent: { hash: '8a2b1c3d', author: 'Jane Doe', subject: 'Add login endpoint' }
+    };
+
+    const output = format(summary);
+    const lines = output.split('\n');
+
+    expect(lines[0]).toBe('Total commits: 3');
+    expect(lines[1]).toBe('Authors:');
+    expect(lines[2]).toBe('  Jane Doe: 2');
+    expect(lines[3]).toBe('  John Smith: 1');
+    expect(lines[4]).toBe('Most recent:');
+    expect(lines[5]).toBe('  8a2b1c3d by Jane Doe — Add login endpoint');
+  });
+
+  it('should format empty summary', () => {
+    const summary = {
+      totalCommits: 0,
+      authors: new Map(),
+      mostRecent: undefined
+    };
+
+    const output = format(summary);
+    expect(output).toBe('Total commits: 0');
+  });
+
+  it('should sort tied authors alphabetically', () => {
+    const summary = {
+      totalCommits: 3,
+      authors: new Map([['Charlie Chaplin', 1], ['Alice Liddell', 1], ['Bob Builder', 1]]),
+      mostRecent: { hash: '1111111111111', author: 'Charlie Chaplin', subject: 'Fix typo' }
+    };
+
+    const output = format(summary);
+    const lines = output.split('\n');
+
+    expect(lines[2]).toBe('  Alice Liddell: 1');
+    expect(lines[3]).toBe('  Bob Builder: 1');
+    expect(lines[4]).toBe('  Charlie Chaplin: 1');
   });
 });

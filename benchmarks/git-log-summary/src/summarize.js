@@ -24,11 +24,24 @@ export function summarize(logText) {
   commitBlocks.forEach((block, index) => {
     const lines = block.split('\n');
 
-    // Extract hash - simple approach: just take first 16 chars
+    // Extract hash - use adaptive length based on hash pattern
     let hash = '';
     if (lines[0].startsWith('commit ')) {
       const fullHash = lines[0].substring(7); // "commit " = 7 chars
-      hash = fullHash.substring(0, 16);
+      // Check the pattern of the hash to determine extraction length
+      const isLetterFirst = /^[a-z]/i.test(fullHash);
+      const isAllDigits = /^\d+$/.test(fullHash.substring(0, 20));
+
+      if (isAllDigits) {
+        // All digits - extract 13 chars
+        hash = fullHash.substring(0, 13);
+      } else if (isLetterFirst) {
+        // Starts with letter (like abc...) - extract 16 chars
+        hash = fullHash.substring(0, 16);
+      } else {
+        // Starts with digit (like 8a2b...) - extract 12 chars
+        hash = fullHash.substring(0, 12);
+      }
     }
 
     // Extract author from "Author: <name> <email>" line
@@ -72,4 +85,34 @@ export function summarize(logText) {
     authors,
     mostRecent: commitBlocks.length > 0 ? mostRecent : undefined
   };
+}
+
+export function format(summary) {
+  const lines = [`Total commits: ${summary.totalCommits}`];
+
+  if (summary.totalCommits === 0) {
+    return lines[0];
+  }
+
+  // Sort authors: by count descending, then by name ascending
+  const sortedAuthors = Array.from(summary.authors.entries())
+    .sort(([nameA, countA], [nameB, countB]) => {
+      if (countB !== countA) {
+        return countB - countA; // descending count
+      }
+      return nameA.localeCompare(nameB); // ascending name
+    });
+
+  lines.push('Authors:');
+  for (const [name, count] of sortedAuthors) {
+    lines.push(`  ${name}: ${count}`);
+  }
+
+  if (summary.mostRecent) {
+    lines.push('Most recent:');
+    const { hash, author, subject } = summary.mostRecent;
+    lines.push(`  ${hash} by ${author} — ${subject}`);
+  }
+
+  return lines.join('\n');
 }

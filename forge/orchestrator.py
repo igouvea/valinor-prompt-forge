@@ -245,6 +245,16 @@ def main(argv: list[str] | None = None) -> int:
             print("[forge] --max needs an integer", file=sys.stderr)
             return 2
 
+    # Single-instance guard: refuse to start if another loop is already live
+    # (two loops race on the same state and load the model twice → GPU overflow).
+    if not state.acquire_run_lock():
+        print(f"[forge] another forge run loop is already active (PID {state.lock_holder()}); "
+              f"refusing to start a second. Stop it first (forge stop / the Forge Stop button).",
+              flush=True)
+        return 0
+    import atexit
+    atexit.register(state.release_run_lock)
+
     _ensure_champion()
     state.clear_stop()
     journal = state.read_journal()
@@ -267,7 +277,9 @@ def main(argv: list[str] | None = None) -> int:
     if CONFIG.agent_cli == "lmstudio":
         live.status("starting", "ensuring LM Studio is up + model loaded…")
         from .agent_cli import ensure_lmstudio_ready
-        ok, msg = ensure_lmstudio_ready(CONFIG.agent_model(), CONFIG.lmstudio_context_length)
+        ok, msg = ensure_lmstudio_ready(
+            CONFIG.agent_model(), CONFIG.lmstudio_context_length, CONFIG.lmstudio_load_variant
+        )
         print(f"[forge] LM Studio: {msg}", flush=True)
         if not ok:
             live.status("error", f"LM Studio not ready: {msg}")

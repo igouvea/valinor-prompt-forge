@@ -9,6 +9,8 @@ dashboard never reads a half-written file.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -76,3 +78,62 @@ def stop_requested() -> bool:
 
 def clear_stop() -> None:
     _STOP_FILE.unlink(missing_ok=True)
+
+
+# ───── single-instance run lock (prevent two concurrent loops) ──────────────
+
+_LOCK_FILE: Path = CONFIG.state_dir / "lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return str(pid) in (out.stdout or "")
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def acquire_run_lock() -> bool:
+    """True if this process took the lock; False if another LIVE loop holds it.
+    A stale lock (holder PID dead) is taken over. Prevents two `forge run`
+    loops racing on the same state (which loads the model twice and overflows
+    the GPU)."""
+    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _LOCK_FILE.exists():
+        try:
+            holder = int(_LOCK_FILE.read_text(encoding="utf-8").split()[0])
+        except Exception:
+            holder = -1
+        if holder != os.getpid() and _pid_alive(holder):
+            return False
+    _LOCK_FILE.write_text(f"{os.getpid()} {time.time()}", encoding="utf-8")
+    return True
+
+
+def release_run_lock() -> None:
+    try:
+        if _LOCK_FILE.exists():
+            holder = int(_LOCK_FILE.read_text(encoding="utf-8").split()[0])
+            if holder == os.getpid():
+                _LOCK_FILE.unlink()
+    except Exception:
+        pass
+
+
+def lock_holder() -> int | None:
+    """PID of the live lock holder, or None."""
+    if not _LOCK_FILE.exists():
+        return None
+    try:
+        pid = int(_LOCK_FILE.read_text(encoding="utf-8").split()[0])
+    except Exception:
+        return None
+    return pid if _pid_alive(pid) else None

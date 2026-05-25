@@ -94,6 +94,11 @@ class ForgeConfig:
     # Context window to load the local model with (LM Studio resets to 4096 on
     # reload; our prompts are ~5-9K tokens so it needs to be generous).
     lmstudio_context_length: int = field(default_factory=lambda: int(_env("FORGE_LMSTUDIO_CTX", "32768")))
+    # Specific quant variant to load (LM Studio "model@quant" form). Q4_K_M is
+    # ~5.6GB and ~2x faster than the Q8 default while leaving 16GB headroom at
+    # 32K. It's loaded under the base identifier so opencode addresses it
+    # unchanged. Empty → load LM Studio's default variant.
+    lmstudio_load_variant: str = field(default_factory=lambda: _env("FORGE_LMSTUDIO_VARIANT", "qwen/qwen3.5-9b@q4_k_m"))
     agent_model_claude: str = field(default_factory=lambda: _env("FORGE_CLAUDE_MODEL", "opus"))
     # codex's top coding model. VERIFY on first codex run; override via env.
     agent_model_codex: str = field(default_factory=lambda: _env("FORGE_CODEX_MODEL", "gpt-5.1-codex"))

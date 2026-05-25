@@ -450,17 +450,22 @@ def _model_key(m: dict) -> str:
     return m.get("modelKey") or m.get("identifier") or ""
 
 
-def ensure_lmstudio_ready(model_id: str, context_length: int = 32768) -> tuple[bool, str]:
+def ensure_lmstudio_ready(
+    model_id: str, context_length: int = 32768, load_variant: str = ""
+) -> tuple[bool, str]:
     """Ensure the LM Studio server is up and ONLY the target model is resident,
-    at a large-enough context. Returns (ok, message).
+    at a large-enough context AND the right quant variant. Returns (ok, message).
 
-    Two gotchas this handles on a 16GB GPU:
+    Gotchas this handles on a 16GB GPU:
       - A model resident at LM Studio's 4096 default truncates our ~11K-token
         prompts; /v1/models only says a model is *downloaded*, so we read the
-        resident contextLength via `lms ps --json` and reload when it's too small.
+        resident contextLength via `lms ps --json` and reload when too small.
+      - The same model can be resident at the wrong quant (e.g. a heavy Q8 vs
+        the intended Q4) — we compare selectedVariant and reload if it differs.
       - Two big models can't coexist in 16GB, so we unload any OTHER resident
         model before loading the target.
-    `model_id` is opencode-form; the LM Studio key drops the provider segment."""
+    `model_id` is opencode-form; `load_variant` (model@quant) pins the quant and
+    is served under the base identifier so opencode addresses it unchanged."""
     lms_key = model_id.split("/", 1)[1] if model_id.startswith("lmstudio/") else model_id
     last = lms_key.rsplit("/", 1)[-1]
 
@@ -476,25 +481,32 @@ def ensure_lmstudio_ready(model_id: str, context_length: int = 32768) -> tuple[b
         if _lmstudio_loaded_models() is None:
             return False, "LM Studio server did not become reachable on :1234"
 
-    # 2. free VRAM: unload any OTHER resident model (16GB can't host two).
+    # 2. already exactly right? (single instance, our model, big ctx, right quant)
     resident = _lms_resident()
-    for m in resident:
-        key = _model_key(m)
-        if key and last not in key:
-            _run_lms(["unload", key], 30)
-
-    # 3. target resident at a big-enough context?
-    target = next((m for m in resident if last in _model_key(m)), None)
+    matches = [m for m in resident if last in _model_key(m)]
+    target = matches[0] if matches else None
     ctx = target.get("contextLength") if target else None
-    if isinstance(ctx, (int, float)) and ctx >= context_length:
-        return True, f"{lms_key} already loaded @ {int(ctx)} ctx"
+    variant_ok = (not load_variant) or (target is not None and target.get("selectedVariant") == load_variant)
+    if (target is not None and len(matches) == 1 and len(resident) == 1
+            and isinstance(ctx, (int, float)) and ctx >= context_length and variant_ok):
+        return True, f"{lms_key} already loaded @ {int(ctx)} ctx ({target.get('selectedVariant')})"
 
-    if ctx is not None:
-        _run_lms(["unload", lms_key], 30)  # drop the too-small instance
-    rc, out = _run_lms(["load", lms_key, "-c", str(context_length), "--gpu", "max", "-y"], 240)
+    # 3. clean slate, then load. `--yes` picks the preferred variant for an
+    #    ambiguous key (LM Studio prefers the smaller Q4) — the `@variant` form
+    #    isn't a valid LOAD key, only a `get` key. unload --all also clears any
+    #    duplicate instances and frees VRAM (16GB can't host two big models).
+    _run_lms(["unload", "--all"], 60)
+    rc, out = _run_lms(["load", lms_key, "-c", str(context_length), "--gpu", "max", "-y"], 300)
     if rc != 0:
         return False, f"`lms load {lms_key} -c {context_length}` failed: {out.strip()[:200]}"
-    return True, f"loaded {lms_key} @ {context_length} ctx"
+
+    got = None
+    after = next((m for m in _lms_resident() if last in _model_key(m)), None)
+    if after is not None:
+        got = after.get("selectedVariant")
+    if load_variant and got and got != load_variant:
+        return True, f"loaded {lms_key} @ {context_length} ctx (got {got}, wanted {load_variant})"
+    return True, f"loaded {lms_key} @ {context_length} ctx ({got or 'default variant'})"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

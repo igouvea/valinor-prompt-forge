@@ -139,7 +139,8 @@ class Live:
 
 
 def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live,
-                   tracker: "ProgressTracker | None" = None) -> tuple[ExperimentResult, list[RubricResult], Score]:
+                   tracker: "ProgressTracker | None" = None,
+                   benchmarks: "tuple | None" = None) -> tuple[ExperimentResult, list[RubricResult], Score]:
     acc = {"cost": 0.0, "roles": 0}
 
     def on_role(bench: str, role: str, phase: str, result=None) -> None:
@@ -161,7 +162,7 @@ def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live,
             live.d["progress"] = tracker.to_dict()
         live.status("running", f"{exp_id}: {role} on {bench} ({phase})")
 
-    exp = run_experiment(prompts, exp_id, on_role=on_role)
+    exp = run_experiment(prompts, exp_id, on_role=on_role, benchmarks=benchmarks)
 
     def on_judge(bench: str, phase: str, tokens: int = 0) -> None:
         if tracker is not None:
@@ -252,6 +253,194 @@ def _write_progress(journal: list[dict], live: Live) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Rotate mode: one benchmark per experiment, per-benchmark ratchet, periodic
+# global checkpoint (re-run the champion on all benchmarks to catch local maxima).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _single_score(bench_result: "BenchmarkResult", rubric: "RubricResult | None") -> Score:
+    """Score ONE benchmark on its own (for per-benchmark ratcheting)."""
+    e = ExperimentResult(exp_id="_single", started_at=0.0,
+                         finished_at=bench_result.wall_seconds, benchmarks=[bench_result])
+    return compute_score(e, rubric.overall if rubric else 0.0)
+
+
+def _agg(scores: dict[str, Score]) -> float:
+    return sum(s.total for s in scores.values()) / len(scores) if scores else 0.0
+
+
+def _rotate_entry(exp_id: str, bench: str, score: Score, adopted: bool,
+                  hypothesis: str, aggregate: float, kind: str, cost: float) -> dict:
+    return {
+        "exp_id": exp_id, "benchmark": bench, "kind": kind, "finished_at": time.time(),
+        "score": round(score.total, 4), "adopted": adopted,
+        "breakdown": {"tests": round(score.tests, 4), "speed": round(score.speed, 4),
+                      "rubric": round(score.rubric, 4),
+                      "raw_wall_seconds": round(score.raw_wall_seconds, 1),
+                      "raw_total_cycles": score.raw_total_cycles},
+        "aggregate": round(aggregate, 4),
+        "hypothesis": hypothesis, "changes_summary": (hypothesis or "")[:120],
+        "cost_usd": round(cost, 4),
+    }
+
+
+def _update_rotate_live(live: Live, journal: list[dict], champion_scores: dict[str, Score]) -> None:
+    live.hydrate_from_journal(journal)
+    agg = _agg(champion_scores)
+    if champion_scores:
+        n = len(champion_scores)
+        live.d["champion"] = {
+            "exp_id": "rotate champion", "score": round(agg, 4),
+            "breakdown": {
+                "tests": round(sum(s.tests for s in champion_scores.values()) / n, 4),
+                "speed": round(sum(s.speed for s in champion_scores.values()) / n, 4),
+                "rubric": round(sum(s.rubric for s in champion_scores.values()) / n, 4),
+            },
+        }
+    live.d["benchmarks"] = {
+        b: {"score": round(s.total, 4), "tests": round(s.tests, 3),
+            "speed": round(s.speed, 3), "rubric": round(s.rubric, 3)}
+        for b, s in champion_scores.items()
+    }
+    live.d["best_score"] = round(max([agg] + [e.get("aggregate", 0.0) for e in journal], default=agg), 4)
+    state.write_live(live.d)
+
+
+def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionPrompts,
+                 max_experiments: int | None) -> int:
+    benchmarks = list(CONFIG.benchmarks)
+    n = len(benchmarks)
+    champion_scores: dict[str, Score] = {}
+    bench_ctx: dict[str, tuple] = {}
+    done = 0
+
+    # Resume per-benchmark champions from the journal (last adopted per benchmark).
+    for e in journal:
+        b = e.get("benchmark")
+        if b in benchmarks and e.get("adopted"):
+            champion_scores[b] = _score_from_entry(e)
+
+    print(f"[forge] rotate mode: {n} benchmarks, global checkpoint every "
+          f"{CONFIG.global_checkpoint_every}", flush=True)
+
+    # Baseline: seed any missing per-benchmark champions by running all once.
+    if any(b not in champion_scores for b in benchmarks):
+        exp_id = _next_exp_id()
+        print(f"[forge] rotate baseline {exp_id} (all benchmarks)", flush=True)
+        tracker = ProgressTracker(exp_id, benchmarks, include_propose=False)
+        live.tracker = tracker
+        live.status("running", f"{exp_id}: baseline (all benchmarks)")
+        try:
+            exp, rubrics, _ = _run_and_score(champion_prompts, exp_id, live, tracker)
+        except Exception as e:
+            traceback.print_exc()
+            live.status("error", f"baseline failed: {e}")
+            return 1
+        rub_by = {r.benchmark: r for r in rubrics}
+        cost = exp.total_cost_usd + sum(r.cost_usd for r in rubrics)
+        for b in exp.benchmarks:
+            sc = _single_score(b, rub_by.get(b.benchmark))
+            champion_scores[b.benchmark] = sc
+            bench_ctx[b.benchmark] = (exp, [rub_by.get(b.benchmark)], sc)
+        for b in exp.benchmarks:
+            entry = _rotate_entry(exp_id, b.benchmark, champion_scores[b.benchmark], True,
+                                  "baseline (seed prompts)", _agg(champion_scores), "baseline", cost / n)
+            state.append_journal(entry)
+            journal.append(entry)
+        done += 1
+        _update_rotate_live(live, journal, champion_scores)
+        print(f"[forge] baseline aggregate={_agg(champion_scores):.3f} "
+              f"per-bench={ {b: round(s.total,3) for b,s in champion_scores.items()} }", flush=True)
+
+    # Rotate loop.
+    while True:
+        if state.stop_requested():
+            print("[forge] stop requested — exiting loop.", flush=True)
+            break
+        if max_experiments is not None and done >= max_experiments:
+            print(f"[forge] reached --max {max_experiments} — stopping.", flush=True)
+            break
+        agg = _agg(champion_scores)
+        if agg >= CONFIG.stop_score_threshold and live.d.get("plateau_count", 0) >= CONFIG.stop_plateau_experiments:
+            print(f"[forge] goal reached: aggregate {agg:.3f} ≥ {CONFIG.stop_score_threshold}. Stopping.", flush=True)
+            break
+
+        bench = benchmarks[done % n]  # round-robin
+        exp_id = _next_exp_id()
+        run_dir = CONFIG.runs_dir / exp_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        tracker = ProgressTracker(exp_id, [bench], include_propose=True)
+        live.tracker = tracker
+
+        tracker.start("propose")
+        live.d["progress"] = tracker.to_dict()
+        live.status("proposing", f"{exp_id}: proposing for {bench}")
+        ctx = bench_ctx.get(bench)
+        context_md = build_context_md(ctx[0], ctx[1], ctx[2]) if ctx else "# No prior context.\n"
+        proposal = propose(candidate_dir=run_dir / "candidate", champion=champion_prompts,
+                           journal_entries=state.read_journal(limit=12), context_md=context_md, log_dir=run_dir)
+        tracker.done("propose", tokens=proposal.tokens_out)
+        live.d["progress"] = tracker.to_dict()
+        if proposal.error:
+            print(f"[forge] {exp_id}: proposer failed ({proposal.error}); skipping.", flush=True)
+            live.status("error", f"{exp_id}: proposer failed"); time.sleep(5); continue
+
+        try:
+            exp, rubrics, score = _run_and_score(proposal.prompts, exp_id, live, tracker, benchmarks=(bench,))
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[forge] {exp_id}: experiment failed ({e}); skipping.", flush=True)
+            live.status("error", f"{exp_id}: experiment failed"); time.sleep(5); continue
+
+        champ = champion_scores.get(bench)
+        won = beats(score, champ)
+        if won:
+            _adopt(proposal.prompts)
+            champion_prompts = proposal.prompts
+            champion_scores[bench] = score
+        bench_ctx[bench] = (exp, rubrics, score)
+        cost = exp.total_cost_usd + proposal.cost_usd + sum(r.cost_usd for r in rubrics)
+        entry = _rotate_entry(exp_id, bench, score, won, proposal.hypothesis, _agg(champion_scores), "rotate", cost)
+        state.append_journal(entry); journal.append(entry)
+        done += 1
+        _update_rotate_live(live, journal, champion_scores)
+        print(f"[forge] {exp_id} [{bench}]: score={score.total:.3f} "
+              f"{'ADOPTED ✓' if won else 'discarded ✗'} | aggregate={_agg(champion_scores):.3f}", flush=True)
+
+        # ── global checkpoint: re-run the champion on ALL benchmarks.
+        if done % CONFIG.global_checkpoint_every == 0:
+            ckpt_id = _next_exp_id()
+            print(f"[forge] global checkpoint {ckpt_id} — champion on all benchmarks", flush=True)
+            tracker = ProgressTracker(ckpt_id, benchmarks, include_propose=False)
+            live.tracker = tracker
+            live.status("running", f"{ckpt_id}: global checkpoint")
+            try:
+                cexp, crubrics, _ = _run_and_score(champion_prompts, ckpt_id, live, tracker)
+                rub_by = {r.benchmark: r for r in crubrics}
+                for b in cexp.benchmarks:
+                    sc = _single_score(b, rub_by.get(b.benchmark))
+                    champion_scores[b.benchmark] = sc
+                    bench_ctx[b.benchmark] = (cexp, [rub_by.get(b.benchmark)], sc)
+                cost = cexp.total_cost_usd + sum(r.cost_usd for r in crubrics)
+                entry = _rotate_entry(ckpt_id, "ALL", Score(_agg(champion_scores), 0, 0, 0, 0.0, 0),
+                                      False, "global checkpoint (champion re-evaluated on all)",
+                                      _agg(champion_scores), "checkpoint", cost)
+                state.append_journal(entry); journal.append(entry)
+                done += 1
+                _update_rotate_live(live, journal, champion_scores)
+                print(f"[forge] checkpoint aggregate={_agg(champion_scores):.3f} "
+                      f"per-bench={ {b: round(s.total,3) for b,s in champion_scores.items()} }", flush=True)
+            except Exception as e:
+                traceback.print_exc()
+                print(f"[forge] checkpoint {ckpt_id} failed ({e}); continuing.", flush=True)
+
+    live.tracker = None
+    live.status("stopped", f"rotate done after {done} experiment(s)")
+    print(f"[forge] rotate champion aggregate={_agg(champion_scores):.3f}", flush=True)
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main loop
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -323,6 +512,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[forge] ABORT — {msg}", flush=True)
             return 1
 
+    # Rotate mode: per-benchmark iteration + global checkpoints (own loop).
+    if CONFIG.benchmark_mode == "rotate":
+        return _rotate_loop(live, journal, champion_prompts, max_experiments)
+
+    # ── sweep mode: baseline + aggregate loop ──
     # ── baseline: if we've never scored the seed champion, do that first.
     if champion_score is None:
         exp_id = _next_exp_id()

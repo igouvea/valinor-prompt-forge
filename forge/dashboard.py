@@ -150,6 +150,11 @@ _HTML = """<!doctype html>
   .step.done { opacity:.65; } .step.done .ico { color:var(--good); }
   .step.running { background:rgba(88,166,255,.10); } .step.running .ico { color:var(--accent); }
   .step.pending { opacity:.5; }
+  .bench-row { display:flex; gap:10px; flex-wrap:wrap; }
+  .bench { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:8px 12px; min-width:140px; }
+  .bench .bn { font-size:12px; color:var(--muted); }
+  .bench .bv { font-size:20px; font-weight:700; margin:2px 0; }
+  .bench .bd { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -161,6 +166,7 @@ _HTML = """<!doctype html>
 </header>
 <main>
   <div class="grid" id="cards"></div>
+  <div id="bench-strip" style="display:none; margin:0 0 16px"></div>
   <div class="chart" id="progress-panel" style="display:none">
     <h2>Loop progress <span id="prog-summary"></span></h2>
     <div class="progbar"><div id="prog-fill" class="progfill"></div></div>
@@ -282,15 +288,16 @@ function renderChart(hist){
   const svg = $("chart");
   const W = svg.clientWidth || 900, H = 160, pad = 24;
   if(!hist || !hist.length){ svg.innerHTML = ""; return; }
-  const xs = hist.map((_,i)=>i), ys = hist.map(e=>e.score||0);
+  const val = e => (e.aggregate!=null ? e.aggregate : (e.score||0));  // aggregate in rotate mode
+  const ys = hist.map(val);
   const maxY = Math.max(1, ...ys), n = hist.length;
   const X = i => pad + (n<=1?0:(i/(n-1))*(W-2*pad));
   const Y = v => H-pad - (v/maxY)*(H-2*pad);
   let path = "", dots = "";
   hist.forEach((e,i)=>{
-    path += (i?"L":"M") + X(i).toFixed(1) + "," + Y(e.score||0).toFixed(1) + " ";
+    path += (i?"L":"M") + X(i).toFixed(1) + "," + Y(val(e)).toFixed(1) + " ";
     const col = e.adopted ? "#3fb950" : "#8b949e";
-    dots += `<circle cx="${X(i).toFixed(1)}" cy="${Y(e.score||0).toFixed(1)}" r="3" fill="${col}"/>`;
+    dots += `<circle cx="${X(i).toFixed(1)}" cy="${Y(val(e)).toFixed(1)}" r="3" fill="${col}"/>`;
   });
   svg.innerHTML =
     `<line x1="${pad}" y1="${H-pad}" x2="${W-pad}" y2="${H-pad}" stroke="#30363d"/>`
@@ -338,12 +345,23 @@ async function toggleDetail(tr, expId){
   }catch(err){ det.innerHTML = `<td colspan="7">error: ${err}</td>`; }
 }
 
+function renderBenchmarks(s){
+  const el = $("bench-strip"); const b = s && s.benchmarks;
+  if(!b || !Object.keys(b).length){ el.style.display="none"; return; }
+  el.style.display="";
+  el.innerHTML = `<div class="eyebrow" style="margin-bottom:6px">Per-benchmark champion · rotate mode</div>`
+    + `<div class="bench-row">` + Object.entries(b).map(([name,v])=>
+        `<div class="bench"><div class="bn">${name}</div><div class="bv">${fmt(v.score,3)}</div>`
+        + `<div class="bd">t ${fmt(v.tests,2)} · s ${fmt(v.speed,2)} · r ${fmt(v.rubric,2)}</div></div>`
+      ).join("") + `</div>`;
+}
+
 async function tick(){
   try{
     const s = await (await fetch("/api/live")).json();
     LAST = s;
     renderBadge(s); renderCfg(s.config); renderCards(s);
-    renderProgress(s);
+    renderBenchmarks(s); renderProgress(s);
     renderChart(s.history||[]); renderRows(s.history||[]);
     const u = s.updated_at ? new Date(s.updated_at*1000).toLocaleTimeString() : "";
     $("foot").textContent = "last update " + u;

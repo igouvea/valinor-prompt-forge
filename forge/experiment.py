@@ -504,9 +504,12 @@ def run_one_benchmark(
     )
 
 
-def run_experiment(prompts: ChampionPrompts, exp_id: str, on_role: "callable | None" = None) -> ExperimentResult:
-    """Run all configured benchmarks, return aggregate result. `on_role(bench,
-    role, phase)` is an optional progress callback for the live dashboard."""
+def run_experiment(prompts: ChampionPrompts, exp_id: str, on_role: "callable | None" = None,
+                   benchmarks: "tuple | None" = None) -> ExperimentResult:
+    """Run the given benchmarks (default: all configured), return aggregate
+    result. `on_role(bench, role, phase, result)` is an optional progress
+    callback. `benchmarks` lets rotate-mode run a single benchmark."""
+    bench_list = tuple(benchmarks) if benchmarks is not None else CONFIG.benchmarks
     exp_dir = CONFIG.runs_dir / exp_id
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -519,7 +522,7 @@ def run_experiment(prompts: ChampionPrompts, exp_id: str, on_role: "callable | N
 
     started = time.time()
     bench_results: list[BenchmarkResult] = []
-    for bench in CONFIG.benchmarks:
+    for bench in bench_list:
         print(f"[forge] running benchmark: {bench}", flush=True)
         result = run_one_benchmark(bench, prompts, exp_dir, on_role=on_role)
         bench_results.append(result)

@@ -124,6 +124,19 @@ class ForgeConfig:
         os.environ.get("FORGE_BENCHMARKS", "json-patch,expr-eval,task-api").split(",")
     ))
 
+    # How the loop sweeps benchmarks:
+    #   "rotate" — each experiment runs ONE benchmark (round-robin), proposes a
+    #             mutation from its failures, and ratchets on THAT benchmark's
+    #             score. ~3x more iterations + faster, but can chase a single
+    #             benchmark's optimum (local maxima) — guarded by global
+    #             checkpoints below.
+    #   "sweep"  — each experiment runs all benchmarks and ratchets on the mean
+    #             (globally balanced, slower).
+    benchmark_mode: str = field(default_factory=lambda: _env("FORGE_BENCHMARK_MODE", "rotate"))
+    # In rotate mode, every N experiments re-run the champion on ALL benchmarks
+    # to measure the true aggregate and detect local-maxima drift.
+    global_checkpoint_every: int = field(default_factory=lambda: int(_env("FORGE_GLOBAL_CHECKPOINT_EVERY", "6")))
+
     # Per-role wall-clock timeout for the agent subprocess (seconds). Failsafe
     # against an agent that gets stuck and never exits.
     role_timeout_s: int = 30 * 60  # 30 min per role

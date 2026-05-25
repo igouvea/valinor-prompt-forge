@@ -60,6 +60,23 @@ describe('summarize', () => {
 });
 
 describe('format', () => {
+  it('should format summary output with single author', () => {
+    const summary = {
+      totalCommits: 1,
+      authors: new Map([['Alice Liddell', 1]]),
+      mostRecent: { hash: 'abc1234567890def', author: 'Alice Liddell', subject: 'First commit' }
+    };
+
+    const output = format(summary);
+    const lines = output.split('\n');
+
+    expect(lines[0]).toBe('Total commits: 1');
+    expect(lines[1]).toBe('Authors:');
+    expect(lines[2]).toBe('  Alice Liddell: 1');
+    expect(lines[3]).toBe('Most recent:');
+    expect(lines[4]).toBe('  abc1234567890def by Alice Liddell — First commit');
+  });
+
   it('should format summary output with multiple authors', () => {
     const summary = {
       totalCommits: 3,

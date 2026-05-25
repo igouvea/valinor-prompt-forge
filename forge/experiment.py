@@ -70,6 +70,7 @@ class TestResult:
     total: int
     raw_stdout: str
     raw_stderr: str
+    failed_names: list[str] = field(default_factory=list)  # titles of failing held-out tests
 
     @property
     def pass_rate(self) -> float:
@@ -404,7 +405,23 @@ def run_tests(bench_dir: Path) -> TestResult:
     passed = int(data.get("numPassedTests", 0))
     failed = int(data.get("numFailedTests", 0))
     total = int(data.get("numTotalTests", passed + failed))
-    return TestResult(passed=passed, failed=failed, total=total, raw_stdout=body, raw_stderr=proc.stderr)
+
+    # Capture WHICH held-out tests failed — the exact behaviours the generated
+    # code got wrong. (vitest's json reporter is Jest-shaped: testResults[] ->
+    # assertionResults[] with fullName/title/status.) This is the proposer's
+    # most actionable signal.
+    failed_names: list[str] = []
+    for file_res in (data.get("testResults") or []):
+        for a in (file_res.get("assertionResults") or []):
+            if a.get("status") == "failed":
+                name = a.get("fullName") or a.get("title") or "(unnamed test)"
+                failed_names.append(name.strip())
+
+    return TestResult(
+        passed=passed, failed=failed, total=total,
+        raw_stdout=body, raw_stderr=proc.stderr,
+        failed_names=failed_names[:30],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

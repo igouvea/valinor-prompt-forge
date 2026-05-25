@@ -47,7 +47,11 @@ VERDICT.
 
 You maximize a single score, averaged over benchmarks:
 
-    score = 0.5 * test_pass_rate + 0.2 * (1 / cycles) + 0.3 * rubric_score
+    score = 0.5 * held_out_test_pass + 0.2 * time_efficiency + 0.3 * rubric_score
+
+test_pass_rate is measured against HELD-OUT golden tests the agents never see — so
+CONTEXT.md's failing-test names tell you EXACTLY which behaviours the generated code
+gets wrong. time_efficiency rewards reaching a correct result in less wall-clock time.
 
 Your working directory contains:
   - planner.md, generator.md, validator.md  → the CURRENT champion prompts. EDIT THESE.
@@ -61,7 +65,9 @@ prompt files in place with your file tools.
 
 Rules (from program.md — obey them):
   - Small, targeted edits beat full rewrites. Change one or two specific things.
-  - Name an explicit hypothesis: "X is causing low scores because Y; this tests it by changing Z."
+  - Your hypothesis MUST cite a specific signal from CONTEXT.md — a named failing test, a
+    ⚠️ low rubric criterion, or the cycles/time — and the exact prompt + section you change
+    to address it, and which agent owns the failure. Generic "make it clearer" is rejected.
   - Do NOT repeat a mutation the journal shows was already tried and discarded.
   - Keep prompts BENCHMARK-AGNOSTIC: never name or hard-code a specific benchmark.
   - The three prompts are coupled — consider the whole pipeline, not one role in isolation.
@@ -98,32 +104,50 @@ def build_context_md(exp: ExperimentResult, rubrics: list[Any], score: Any) -> s
         f"rubric={getattr(score, 'rubric', 0):.2f})"
     )
     lines.append(
-        "Note: the speed channel rewards reaching a CORRECT result in less "
-        "wall-clock time — a tighter, less-wandering prompt scores higher here."
+        "The speed channel rewards reaching a CORRECT result in less wall-clock time."
+    )
+    lines.append("")
+    lines.append(
+        "HOW TO READ THIS: trace every failure to its owning agent before proposing —\n"
+        "  • a failing held-out test, or low GENERATOR rubric → the generator under-implemented it,\n"
+        "    OR the PLANNER never specified that behaviour as an acceptance criterion;\n"
+        "  • a wrong VERDICT or low VALIDATOR rubric → the validator wasn't skeptical enough;\n"
+        "  • 0/0 tests → the implementation didn't honour the module contract at all;\n"
+        "  • high cycles / time → the pipeline wandered.\n"
+        "Your hypothesis must cite the SPECIFIC signal below and the exact prompt+section you change."
     )
     lines.append("")
     rub_by_bench = {r.benchmark: r for r in rubrics}
     for b in exp.benchmarks:
         lines.append(f"## Benchmark: {b.benchmark}")
         lines.append(
-            f"- verdict: **{b.verdict}**, cycles: {b.cycles}, "
-            f"tests: {b.test.passed}/{b.test.total} passed"
+            f"- verdict: **{b.verdict}** · cycles: {b.cycles} · "
+            f"held-out tests: **{b.test.passed}/{b.test.total} passed**"
         )
-        # failing test output snippet (most actionable signal)
-        if b.test.failed > 0 or b.test.total == 0:
-            snippet = (b.test.raw_stderr or b.test.raw_stdout or "")[-1200:]
+        # WHICH held-out behaviours the generated code got wrong (most actionable).
+        failed_names = getattr(b.test, "failed_names", None) or []
+        if failed_names:
+            lines.append("\nFailing held-out tests — these exact behaviours are WRONG in the code:")
+            for name in failed_names[:20]:
+                lines.append(f"  - {name}")
+        elif b.test.total == 0:
+            lines.append(
+                "\n**0 tests ran** — the implementation didn't even load against the contract "
+                "(missing/wrongly-exported `src/index.js`, syntax error, or wrong module shape). "
+                "The first fix is making the generator honour the EXACT module contract from the spec."
+            )
+            snippet = (b.test.raw_stderr or b.test.raw_stdout or "")[-700:]
             if snippet.strip():
-                lines.append("\n<failing test output (tail)>\n```\n" + snippet.strip() + "\n```")
-        # low-scoring rubric criteria with the judge's reasoning
+                lines.append("```\n" + snippet.strip() + "\n```")
+        # FULL rubric per role (all criteria), weak ones flagged.
         rub = rub_by_bench.get(b.benchmark)
         if rub:
-            lines.append(f"\nJudge overall: {rub.overall:.2f} — {rub.rationale}")
+            lines.append(f"\nJudge overall {rub.overall:.2f} — {rub.rationale}")
             for role_score in rub.roles:
-                weak = [c for c in role_score.criteria if c.score <= 1]
-                if weak:
-                    lines.append(f"\n**{role_score.role}** weak criteria:")
-                    for c in weak:
-                        lines.append(f"  - `{c.key}` ({c.score}/3): {c.rationale}")
+                lines.append(f"\n**{role_score.role}** rubric:")
+                for c in role_score.criteria:
+                    flag = " ⚠️ WEAK" if c.score <= 1 else ""
+                    lines.append(f"  - `{c.key}` {c.score}/3{flag}: {c.rationale}")
         lines.append("")
     return "\n".join(lines)
 

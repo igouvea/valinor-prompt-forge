@@ -301,12 +301,20 @@ def score_benchmark(bench: BenchmarkResult, *, log_dir: Path, call_judge: bool =
 
 
 def score_experiment(
-    exp: ExperimentResult, *, log_dir: Path | None = None, call_judge: bool = True
+    exp: ExperimentResult, *, log_dir: Path | None = None, call_judge: bool = True,
+    on_judge: "callable | None" = None,
 ) -> tuple[float, list[RubricResult]]:
-    """Score every benchmark. Returns (mean_overall, per_benchmark_rubrics)."""
+    """Score every benchmark. Returns (mean_overall, per_benchmark_rubrics).
+    `on_judge(benchmark, phase)` is an optional progress hook ("start"/"done")."""
     log_dir = log_dir or (CONFIG.runs_dir / exp.exp_id)
     log_dir.mkdir(parents=True, exist_ok=True)
-    rubrics = [score_benchmark(b, log_dir=log_dir, call_judge=call_judge) for b in exp.benchmarks]
+    rubrics: list[RubricResult] = []
+    for b in exp.benchmarks:
+        if on_judge:
+            on_judge(b.benchmark, "start")
+        rubrics.append(score_benchmark(b, log_dir=log_dir, call_judge=call_judge))
+        if on_judge:
+            on_judge(b.benchmark, "done")
     if not rubrics:
         return 0.0, []
     mean = sum(r.overall for r in rubrics) / len(rubrics)

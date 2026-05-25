@@ -135,6 +135,17 @@ _HTML = """<!doctype html>
   tr.detailrow td { background:#0b0f14; color:var(--muted); white-space:pre-wrap;
                     font:12px ui-monospace,SFMono-Regular,Menlo,monospace; }
   .foot { color:var(--muted); font-size:12px; margin-top:16px; text-align:center; }
+  #prog-summary { font-weight:400; color:var(--muted); text-transform:none; letter-spacing:0; font-size:12px; }
+  .progbar { height:10px; background:#21262d; border-radius:5px; overflow:hidden; margin:4px 0 12px; }
+  .progfill { height:100%; width:0%; background:var(--good); transition:width .4s ease; }
+  .steps { display:grid; gap:3px; }
+  .step { display:flex; align-items:center; gap:8px; font-size:13px; padding:3px 6px; border-radius:5px; }
+  .step .ico { width:14px; text-align:center; }
+  .step .lbl { flex:1; }
+  .step .t { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .step.done { opacity:.65; } .step.done .ico { color:var(--good); }
+  .step.running { background:rgba(88,166,255,.10); } .step.running .ico { color:var(--accent); }
+  .step.pending { opacity:.5; }
 </style>
 </head>
 <body>
@@ -146,6 +157,11 @@ _HTML = """<!doctype html>
 </header>
 <main>
   <div class="grid" id="cards"></div>
+  <div class="chart" id="progress-panel" style="display:none">
+    <h2>Loop progress <span id="prog-summary"></span></h2>
+    <div class="progbar"><div id="prog-fill" class="progfill"></div></div>
+    <div id="prog-steps" class="steps"></div>
+  </div>
   <div class="chart">
     <h2>Score over experiments</h2>
     <svg id="chart" width="100%" height="160" preserveAspectRatio="none"></svg>
@@ -172,19 +188,46 @@ let LAST = null;  // most recent live snapshot, for the client-side clock
 // counts up and is clearly alive — not "stuck".
 function updateClock(){
   const el = $("elapsed");
-  if(!LAST || !LAST.updated_at){ el.textContent = ""; return; }
-  const age = Math.round(Date.now()/1000 - LAST.updated_at);
+  if(!LAST){ el.textContent = ""; return; }
   const active = ["running","proposing","judging","starting"].includes(LAST.status);
-  if(active){
-    el.textContent = `● working · ${age}s in this phase`;
-    el.classList.toggle("stale", age > 600);
+  const drift = (active && LAST.updated_at) ? Math.max(0, Date.now()/1000 - LAST.updated_at) : 0;
+  const p = LAST.progress;
+  if(p && active){
+    el.textContent = `● ${p.current||"working"} · elapsed ${fmtDur((p.elapsed||0)+drift)} · ETA ~${fmtDur(Math.max(0,(p.eta_seconds||0)-drift))}`;
+    el.classList.toggle("stale", drift > 600);
+  } else if(active){
+    el.textContent = `● working · ${Math.round(drift)}s in this phase`;
+    el.classList.remove("stale");
   } else {
-    el.textContent = LAST.updated_at ? `updated ${age}s ago` : "";
+    el.textContent = LAST.updated_at ? `updated ${Math.round(Date.now()/1000 - LAST.updated_at)}s ago` : "";
     el.classList.remove("stale");
   }
+  renderProgress(LAST);
 }
 
 function fmt(n, d=3){ return (n==null||isNaN(n)) ? "–" : Number(n).toFixed(d); }
+function fmtDur(s){ s=Math.max(0,Math.round(s||0)); if(s<60) return s+"s"; const m=Math.floor(s/60), r=s%60; return r? m+"m "+r+"s" : m+"m"; }
+
+// Loop-progress panel: step checklist + bar + ETA. Interpolates elapsed/ETA
+// from updated_at so the numbers tick smoothly between server updates.
+function renderProgress(s){
+  const panel = $("progress-panel"); const p = s && s.progress;
+  if(!p){ panel.style.display="none"; return; }
+  panel.style.display="";
+  const active = ["running","proposing","judging","starting"].includes(s.status);
+  const drift = (active && s.updated_at) ? Math.max(0, Date.now()/1000 - s.updated_at) : 0;
+  const curEl = (p.current_elapsed||0)+drift;
+  $("prog-summary").textContent = `${p.exp_id} · step ${p.steps_done}/${p.steps_total}`
+    + (p.current ? ` · ${p.current} (${fmtDur(curEl)})` : "")
+    + ` · elapsed ${fmtDur((p.elapsed||0)+drift)} · ETA ~${fmtDur(Math.max(0,(p.eta_seconds||0)-drift))}`;
+  $("prog-fill").style.width = (p.steps_total ? (p.steps_done/p.steps_total*100) : 0) + "%";
+  $("prog-steps").innerHTML = (p.steps||[]).map(st=>{
+    const ico = st.status==="done" ? "✓" : (st.status==="running" ? "▶" : "·");
+    const t = st.seconds ? fmtDur(st.seconds) : (st.status==="running" ? fmtDur(curEl) : "");
+    return `<div class="step ${st.status}"><span class="ico">${ico}</span>`
+      + `<span class="lbl">${st.label}</span><span class="t">${t}</span></div>`;
+  }).join("");
+}
 
 function renderBadge(s){
   const b = $("badge");
@@ -291,6 +334,7 @@ async function tick(){
     const s = await (await fetch("/api/live")).json();
     LAST = s;
     renderBadge(s); renderCfg(s.config); renderCards(s);
+    renderProgress(s);
     renderChart(s.history||[]); renderRows(s.history||[]);
     const u = s.updated_at ? new Date(s.updated_at*1000).toLocaleTimeString() : "";
     $("foot").textContent = "last update " + u;

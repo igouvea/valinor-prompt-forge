@@ -30,6 +30,7 @@ from .experiment import ChampionPrompts, ExperimentResult, run_experiment, _next
 from .judge import score_experiment, RubricResult
 from .scorer import Score, compute_score, beats
 from .proposer import propose, build_context_md
+from .progress import ProgressTracker
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,7 +99,9 @@ class Live:
             "best_score": 0.0,
             "plateau_count": 0,
             "history": [],
+            "progress": None,
         }
+        self.tracker = None  # current ProgressTracker; the heartbeat refreshes it
 
     def set(self, **kw) -> None:
         self.d.update(kw)
@@ -135,10 +138,16 @@ class Live:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live) -> tuple[ExperimentResult, list[RubricResult], Score]:
+def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live,
+                   tracker: "ProgressTracker | None" = None) -> tuple[ExperimentResult, list[RubricResult], Score]:
     acc = {"cost": 0.0, "roles": 0}
 
     def on_role(bench: str, role: str, phase: str, result=None) -> None:
+        if tracker is not None:
+            if phase == "start":
+                tracker.start(f"{bench}/{role}")
+            elif phase == "done":
+                tracker.done(f"{bench}/{role}")
         if phase == "done" and result is not None:
             acc["cost"] += getattr(result, "cost_usd", 0.0) or 0.0
             acc["roles"] += 1
@@ -148,12 +157,24 @@ def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live) -> tuple[E
             "cost_usd": round(acc["cost"], 4),
             "roles_done": acc["roles"],
         }
+        if tracker is not None:
+            live.d["progress"] = tracker.to_dict()
         live.status("running", f"{exp_id}: {role} on {bench} ({phase})")
 
     exp = run_experiment(prompts, exp_id, on_role=on_role)
-    live.status("judging", f"{exp_id}: grading artifacts")
-    rubric_mean, rubrics = score_experiment(exp)
+
+    def on_judge(bench: str, phase: str) -> None:
+        if tracker is not None:
+            if phase == "start":
+                tracker.start(f"{bench}/judge")
+            elif phase == "done":
+                tracker.done(f"{bench}/judge")
+            live.d["progress"] = tracker.to_dict()
+        live.status("judging", f"{exp_id}: judging {bench}")
+
+    rubric_mean, rubrics = score_experiment(exp, on_judge=on_judge)
     score = compute_score(exp, rubric_mean)
+    live.tracker = None
     live.d["current_exp"] = None
     return exp, rubrics, score
 
@@ -268,8 +289,10 @@ def main(argv: list[str] | None = None) -> int:
     # minutes). Without it, live.json goes stale and the app flips to IDLE.
     def _heartbeat() -> None:
         while True:
-            time.sleep(15)
+            time.sleep(10)
             try:
+                if live.tracker is not None:
+                    live.d["progress"] = live.tracker.to_dict()  # refresh elapsed/ETA
                 state.write_live(live.d)
             except Exception:
                 pass
@@ -304,9 +327,11 @@ def main(argv: list[str] | None = None) -> int:
     if champion_score is None:
         exp_id = _next_exp_id()
         print(f"[forge] baseline {exp_id} (seed champion, no mutation)", flush=True)
+        tracker = ProgressTracker(exp_id, CONFIG.benchmarks, include_propose=False)
+        live.tracker = tracker
         live.status("running", f"{exp_id}: baseline")
         try:
-            exp, rubrics, score = _run_and_score(champion_prompts, exp_id, live)
+            exp, rubrics, score = _run_and_score(champion_prompts, exp_id, live, tracker)
         except Exception as e:
             traceback.print_exc()
             live.status("error", f"baseline failed: {e}")
@@ -344,8 +369,12 @@ def main(argv: list[str] | None = None) -> int:
         exp_id = _next_exp_id()
         run_dir = CONFIG.runs_dir / exp_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        tracker = ProgressTracker(exp_id, CONFIG.benchmarks, include_propose=True)
+        live.tracker = tracker
 
         # 1. propose
+        tracker.start("propose")
+        live.d["progress"] = tracker.to_dict()
         live.status("proposing", f"{exp_id}: proposing mutation")
         context_md = (build_context_md(latest_exp, latest_rubrics, latest_score)
                       if latest_exp is not None else "# No prior experiment context.\n")
@@ -356,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
             context_md=context_md,
             log_dir=run_dir,
         )
+        tracker.done("propose")
+        live.d["progress"] = tracker.to_dict()
         if proposal.error:
             print(f"[forge] {exp_id}: proposer failed ({proposal.error}); skipping.", flush=True)
             live.status("error", f"{exp_id}: proposer failed: {proposal.error}")
@@ -364,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # 2. run + 3. judge + score
         try:
-            exp, rubrics, score = _run_and_score(proposal.prompts, exp_id, live)
+            exp, rubrics, score = _run_and_score(proposal.prompts, exp_id, live, tracker)
         except Exception as e:
             traceback.print_exc()
             print(f"[forge] {exp_id}: experiment failed ({e}); skipping.", flush=True)

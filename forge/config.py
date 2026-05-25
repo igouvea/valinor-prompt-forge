@@ -138,8 +138,10 @@ class ForgeConfig:
     global_checkpoint_every: int = field(default_factory=lambda: int(_env("FORGE_GLOBAL_CHECKPOINT_EVERY", "6")))
 
     # Per-role wall-clock timeout for the agent subprocess (seconds). Failsafe
-    # against an agent that gets stuck and never exits.
-    role_timeout_s: int = 30 * 60  # 30 min per role
+    # against an agent that thrashes (write→test→fail→rewrite) and never
+    # converges. A healthy generator averages ~6 min, so 15 gives ample buffer
+    # while cutting off runaway loops. Override via FORGE_ROLE_TIMEOUT_S.
+    role_timeout_s: int = field(default_factory=lambda: int(_env("FORGE_ROLE_TIMEOUT_S", str(15 * 60))))
 
     # Max validator→generator rework rounds per benchmark. 1 means: planner once,
     # generator once, validator once. If validator FAILs, the cycle is over.

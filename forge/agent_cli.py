@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -375,18 +376,37 @@ def _run_opencode_agent(
                 errors="replace", shell=False,
             )
             assert proc.stdout is not None
-            for line in proc.stdout:
-                log.write(line)
-                if session_id is None:
-                    match = _SESSION_RE.search(line)
-                    if match:
-                        session_id = match.group(1)
-                for m in _OPENCODE_TOK_RE.finditer(line):  # sum per-turn output+reasoning
-                    tokens_out += int(m.group(1)) + int(m.group(2))
+            # The read loop below blocks until the subprocess stops streaming, so
+            # a post-loop proc.wait(timeout=) never fires while a runaway agent is
+            # still emitting tokens — the wall-clock cap would be dead code. Use a
+            # watchdog that kills the process at the deadline; killing it closes
+            # stdout, which unblocks the read loop and lets us return cleanly.
+            timed_out = threading.Event()
+
+            def _watchdog() -> None:
+                timed_out.set()
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+            watchdog = threading.Timer(timeout_s, _watchdog)
+            watchdog.daemon = True
+            watchdog.start()
             try:
-                proc.wait(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                for line in proc.stdout:
+                    log.write(line)
+                    if session_id is None:
+                        match = _SESSION_RE.search(line)
+                        if match:
+                            session_id = match.group(1)
+                    for m in _OPENCODE_TOK_RE.finditer(line):  # sum per-turn output+reasoning
+                        tokens_out += int(m.group(1)) + int(m.group(2))
+                proc.wait()
+            finally:
+                watchdog.cancel()
+            if timed_out.is_set():
+                log.write(f"\n[forge] TIMEOUT after {timeout_s}s — killed runaway agent\n")
                 return AgentRun("", 0, 0.0, True, session_id, None, 0.0, tokens_out, f"timeout after {timeout_s}s")
     except FileNotFoundError as e:
         return AgentRun("", 0, 0.0, True, None, None, 0.0, 0, f"opencode not found: {e}")

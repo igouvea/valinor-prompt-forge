@@ -28,4 +28,33 @@ describe('summarize', () => {
     expect(result.mostRecent.author).toBe('Alice Liddell');
     expect(result.mostRecent.subject).toBe('First commit');
   });
+
+  it('should parse three-commit fixture correctly', async () => {
+    const fs = await import('fs');
+    const logText = fs.readFileSync('tests/fixtures/three-commits.log', 'utf-8');
+    const result = summarize(logText);
+
+    expect(result.totalCommits).toBe(3);
+    expect(result.authors.size).toBe(2);
+    expect(result.authors.get('Jane Doe')).toBe(2);
+    expect(result.authors.get('John Smith')).toBe(1);
+    expect(result.mostRecent.hash).toBe('8a2b1c3d4e5f');
+    expect(result.mostRecent.author).toBe('Jane Doe');
+    expect(result.mostRecent.subject).toBe('Add login endpoint');
+  });
+
+  it('should handle tied author counts (all 1 commit each)', async () => {
+    const fs = await import('fs');
+    const logText = fs.readFileSync('tests/fixtures/tied-authors.log', 'utf-8');
+    const result = summarize(logText);
+
+    expect(result.totalCommits).toBe(3);
+    expect(result.authors.size).toBe(3);
+    expect(result.authors.get('Alice Liddell')).toBe(1);
+    expect(result.authors.get('Bob Builder')).toBe(1);
+    expect(result.authors.get('Charlie Chaplin')).toBe(1);
+    expect(result.mostRecent.hash).toBe('1111111111111');
+    expect(result.mostRecent.author).toBe('Charlie Chaplin');
+    expect(result.mostRecent.subject).toBe('Fix typo');
+  });
 });

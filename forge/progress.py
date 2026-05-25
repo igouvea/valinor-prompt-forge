@@ -68,7 +68,8 @@ class ProgressTracker:
 
     @staticmethod
     def _mk(key: str, label: str, typ: str) -> dict:
-        return {"key": key, "label": label, "type": typ, "status": "pending", "seconds": 0.0, "_start": None}
+        return {"key": key, "label": label, "type": typ, "status": "pending",
+                "seconds": 0.0, "tokens": 0, "tps": None, "_start": None}
 
     def start(self, key: str) -> None:
         for s in self.steps:
@@ -79,10 +80,12 @@ class ProgressTracker:
                 s["status"] = "running"
                 s["_start"] = time.time()
 
-    def done(self, key: str) -> None:
+    def done(self, key: str, tokens: int = 0) -> None:
         for s in self.steps:
             if s["key"] == key and s["status"] == "running":
                 self._finish(s)
+                s["tokens"] = tokens
+                s["tps"] = round(tokens / s["seconds"], 1) if s["seconds"] > 0 and tokens else None
         _save_estimates(self.est)
 
     def _finish(self, s: dict) -> None:
@@ -114,7 +117,9 @@ class ProgressTracker:
             "elapsed": round(now - self.started, 1),
             "eta_seconds": round(eta, 1),
             "steps": [
-                {"label": s["label"], "type": s["type"], "status": s["status"], "seconds": s["seconds"]}
+                {"label": s["label"], "type": s["type"], "status": s["status"],
+                 "seconds": s["seconds"], "tps": s.get("tps"),
+                 "avg": round(self.est.get(s["type"], 0.0), 1)}
                 for s in self.steps
             ],
         }

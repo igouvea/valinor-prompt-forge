@@ -142,7 +142,11 @@ _HTML = """<!doctype html>
   .step { display:flex; align-items:center; gap:8px; font-size:13px; padding:3px 6px; border-radius:5px; }
   .step .ico { width:14px; text-align:center; }
   .step .lbl { flex:1; }
-  .step .t { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .step .tps { color:var(--accent); font-variant-numeric:tabular-nums; width:84px; text-align:right; font-size:12px; }
+  .step .t { color:var(--fg); font-variant-numeric:tabular-nums; width:64px; text-align:right; }
+  .step .avg { color:var(--muted); opacity:.75; font-variant-numeric:tabular-nums; width:96px; text-align:right; font-size:12px; }
+  .step.head { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); opacity:1; padding-bottom:2px; }
+  .step.head .t, .step.head .tps, .step.head .avg, .step.head .lbl { color:var(--muted); }
   .step.done { opacity:.65; } .step.done .ico { color:var(--good); }
   .step.running { background:rgba(88,166,255,.10); } .step.running .ico { color:var(--accent); }
   .step.pending { opacity:.5; }
@@ -221,11 +225,16 @@ function renderProgress(s){
     + (p.current ? ` · ${p.current} (${fmtDur(curEl)})` : "")
     + ` · elapsed ${fmtDur((p.elapsed||0)+drift)} · ETA ~${fmtDur(Math.max(0,(p.eta_seconds||0)-drift))}`;
   $("prog-fill").style.width = (p.steps_total ? (p.steps_done/p.steps_total*100) : 0) + "%";
-  $("prog-steps").innerHTML = (p.steps||[]).map(st=>{
+  const head = `<div class="step head"><span class="ico"></span><span class="lbl">step</span>`
+    + `<span class="tps">tok/s</span><span class="t">time</span><span class="avg">avg</span></div>`;
+  $("prog-steps").innerHTML = head + (p.steps||[]).map(st=>{
     const ico = st.status==="done" ? "✓" : (st.status==="running" ? "▶" : "·");
-    const t = st.seconds ? fmtDur(st.seconds) : (st.status==="running" ? fmtDur(curEl) : "");
+    const dur = st.seconds ? fmtDur(st.seconds) : (st.status==="running" ? fmtDur(curEl) : "");
+    const tps = (st.tps!=null) ? `${st.tps} tok/s` : (st.status==="running" ? "…" : "");
+    const avg = st.avg ? `avg ${fmtDur(st.avg)}` : "";
     return `<div class="step ${st.status}"><span class="ico">${ico}</span>`
-      + `<span class="lbl">${st.label}</span><span class="t">${t}</span></div>`;
+      + `<span class="lbl">${st.label}</span>`
+      + `<span class="tps">${tps}</span><span class="t">${dur}</span><span class="avg">${avg}</span></div>`;
   }).join("");
 }
 

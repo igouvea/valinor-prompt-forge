@@ -35,6 +35,7 @@ class Proposal:
     rationale: str    # full RATIONALE.md text
     hypothesis: str   # extracted ## Hypothesis (best-effort)
     cost_usd: float
+    tokens_out: int = 0
     error: str | None = None
 
 
@@ -242,4 +243,5 @@ def propose(
         rationale=rationale,
         hypothesis=_extract_hypothesis(rationale),
         cost_usd=run.cost_usd,
+        tokens_out=run.tokens_out,
     )

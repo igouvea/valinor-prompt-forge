@@ -118,6 +118,7 @@ class RubricResult:
     overall: float  # 0..1, mean of role averages
     rationale: str  # judge's overall paragraph
     cost_usd: float = 0.0
+    tokens_out: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -237,7 +238,7 @@ def _empty_rubric(bench: BenchmarkResult, reason: str) -> RubricResult:
     return RubricResult(benchmark=bench.benchmark, roles=roles, overall=0.0, rationale=reason)
 
 
-def _assemble(bench: BenchmarkResult, data: dict[str, Any], cost: float) -> RubricResult:
+def _assemble(bench: BenchmarkResult, data: dict[str, Any], cost: float, tokens: int = 0) -> RubricResult:
     roles_data = data.get("roles") or {}
     role_scores: list[RoleScore] = []
     for role in ROLES:
@@ -270,6 +271,7 @@ def _assemble(bench: BenchmarkResult, data: dict[str, Any], cost: float) -> Rubr
         overall=overall,
         rationale=str(data.get("overall_rationale", "")).strip(),
         cost_usd=cost,
+        tokens_out=tokens,
     )
 
 
@@ -297,7 +299,7 @@ def score_benchmark(bench: BenchmarkResult, *, log_dir: Path, call_judge: bool =
         data = _parse_judge_response(run.final_text)
     except Exception as e:
         return _empty_rubric(bench, f"judge response unparseable: {e}")
-    return _assemble(bench, data, run.cost_usd)
+    return _assemble(bench, data, run.cost_usd, run.tokens_out)
 
 
 def score_experiment(
@@ -311,10 +313,11 @@ def score_experiment(
     rubrics: list[RubricResult] = []
     for b in exp.benchmarks:
         if on_judge:
-            on_judge(b.benchmark, "start")
-        rubrics.append(score_benchmark(b, log_dir=log_dir, call_judge=call_judge))
+            on_judge(b.benchmark, "start", 0)
+        r = score_benchmark(b, log_dir=log_dir, call_judge=call_judge)
+        rubrics.append(r)
         if on_judge:
-            on_judge(b.benchmark, "done")
+            on_judge(b.benchmark, "done", r.tokens_out)
     if not rubrics:
         return 0.0, []
     mean = sum(r.overall for r in rubrics) / len(rubrics)

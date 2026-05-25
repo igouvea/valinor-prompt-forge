@@ -51,7 +51,12 @@ class AgentRun:
     session_id: str | None
     exit_code: int | None
     wall_seconds: float
+    tokens_out: int = 0   # generated tokens (output + reasoning) — for tok/s
     error: str | None = None
+
+
+# opencode emits per-turn usage in its --format json stream; sum output+reasoning.
+_OPENCODE_TOK_RE = re.compile(r'"tokens":\{"total":\d+,"input":\d+,"output":(\d+),"reasoning":(\d+)')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -237,6 +242,7 @@ def _run_claude_agent(
         session_id=data.get("session_id"),
         exit_code=exit_code,
         wall_seconds=0.0,
+        tokens_out=int((data.get("usage") or {}).get("output_tokens", 0) or 0),
     )
 
 
@@ -360,6 +366,7 @@ def _run_opencode_agent(
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     session_id: str | None = None
+    tokens_out = 0
     try:
         with log_path.open("w", encoding="utf-8") as log:
             proc = subprocess.Popen(
@@ -374,13 +381,15 @@ def _run_opencode_agent(
                     match = _SESSION_RE.search(line)
                     if match:
                         session_id = match.group(1)
+                for m in _OPENCODE_TOK_RE.finditer(line):  # sum per-turn output+reasoning
+                    tokens_out += int(m.group(1)) + int(m.group(2))
             try:
                 proc.wait(timeout=timeout_s)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                return AgentRun("", 0, 0.0, True, session_id, None, 0.0, error=f"timeout after {timeout_s}s")
+                return AgentRun("", 0, 0.0, True, session_id, None, 0.0, tokens_out, f"timeout after {timeout_s}s")
     except FileNotFoundError as e:
-        return AgentRun("", 0, 0.0, True, None, None, 0.0, error=f"opencode not found: {e}")
+        return AgentRun("", 0, 0.0, True, None, None, 0.0, 0, f"opencode not found: {e}")
 
     final = _opencode_export_text(session_id) if session_id else ""
     return AgentRun(
@@ -391,6 +400,7 @@ def _run_opencode_agent(
         session_id=session_id,
         exit_code=proc.returncode,
         wall_seconds=0.0,
+        tokens_out=tokens_out,
     )
 
 
@@ -560,4 +570,5 @@ def run_researcher(
         session_id=data.get("session_id"),
         exit_code=exit_code,
         wall_seconds=wall,
+        tokens_out=int((data.get("usage") or {}).get("output_tokens", 0) or 0),
     )

@@ -147,7 +147,7 @@ def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live,
             if phase == "start":
                 tracker.start(f"{bench}/{role}")
             elif phase == "done":
-                tracker.done(f"{bench}/{role}")
+                tracker.done(f"{bench}/{role}", tokens=getattr(result, "tokens_out", 0) or 0)
         if phase == "done" and result is not None:
             acc["cost"] += getattr(result, "cost_usd", 0.0) or 0.0
             acc["roles"] += 1
@@ -163,12 +163,12 @@ def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live,
 
     exp = run_experiment(prompts, exp_id, on_role=on_role)
 
-    def on_judge(bench: str, phase: str) -> None:
+    def on_judge(bench: str, phase: str, tokens: int = 0) -> None:
         if tracker is not None:
             if phase == "start":
                 tracker.start(f"{bench}/judge")
             elif phase == "done":
-                tracker.done(f"{bench}/judge")
+                tracker.done(f"{bench}/judge", tokens=tokens)
             live.d["progress"] = tracker.to_dict()
         live.status("judging", f"{exp_id}: judging {bench}")
 
@@ -385,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
             context_md=context_md,
             log_dir=run_dir,
         )
-        tracker.done("propose")
+        tracker.done("propose", tokens=proposal.tokens_out)
         live.d["progress"] = tracker.to_dict()
         if proposal.error:
             print(f"[forge] {exp_id}: proposer failed ({proposal.error}); skipping.", flush=True)

@@ -60,6 +60,7 @@ class RoleResult:
     artifact: str | None  # the role's primary handoff artifact (spec/build-report/validation)
     cost_usd: float = 0.0
     num_turns: int = 0
+    tokens_out: int = 0
     error: str | None = None
 
 
@@ -319,6 +320,7 @@ def run_role(
         artifact=artifact,
         cost_usd=run.cost_usd,
         num_turns=run.num_turns,
+        tokens_out=run.tokens_out,
         error=run.error,
     )
 

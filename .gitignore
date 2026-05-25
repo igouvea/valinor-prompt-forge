@@ -20,8 +20,10 @@ benchmarks/*/.opencode/
 benchmarks/*/src/
 benchmarks/*/bin/
 benchmarks/*/tests/*.test.js
+benchmarks/*/test/
 benchmarks/*/coverage/
 benchmarks/*/node_modules/
+benchmarks/*/package-lock.json
 
 # Secrets
 .env

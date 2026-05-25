@@ -303,6 +303,7 @@ def run_role(
         work_dir=bench_dir,
         sys_prompt_file=sp_file,
         log_path=log_path,
+        label=role,
     )
 
     artifact_path = bench_dir / ROLE_PRIMARY_ARTIFACT[role]

@@ -25,9 +25,12 @@ Key implementation facts (verified against claude 2.1.150 on Windows):
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -178,9 +181,11 @@ def run_agent(
     cli: str | None = None,
     model: str | None = None,
     timeout_s: int | None = None,
+    label: str = "agent",
 ) -> AgentRun:
     """Run a tool-using coding agent inside `work_dir`. Returns its final text +
-    turn/cost stats. The role's system prompt is written to `sys_prompt_file`."""
+    turn/cost stats. The role's system prompt is written to `sys_prompt_file`.
+    `label` names the role (used for the opencode agent definition)."""
     cli = cli or CONFIG.agent_cli
     model = model or CONFIG.agent_model()
     timeout_s = timeout_s or CONFIG.role_timeout_s
@@ -189,7 +194,12 @@ def run_agent(
     sys_prompt_file.write_text(system_prompt, encoding="utf-8")
 
     started = time.time()
-    if cli == "codex":
+    if cli == "lmstudio":
+        run = _run_opencode_agent(
+            system_prompt, user_message, work_dir, model, log_path, timeout_s,
+            agent_name=f"forge-{label}",
+        )
+    elif cli == "codex":
         run = _run_codex_agent(user_message, system_prompt, work_dir, model, log_path, timeout_s)
     else:
         run = _run_claude_agent(user_message, sys_prompt_file, work_dir, model, log_path, timeout_s)
@@ -261,6 +271,230 @@ def _run_codex_agent(
         exit_code=exit_code,
         wall_seconds=0.0,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# opencode + LM Studio driver (local models — gpt-oss-20b etc.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _opencode_entry() -> tuple[str, str] | None:
+    """(node, opencode-js) so we invoke node directly and dodge cmd.exe's 8K
+    command-line limit on Windows. None → fall back to `opencode` on PATH."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        cand = Path(appdata) / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+        if cand.is_file():
+            local_node = cand.parent.parent.parent.parent / "node.exe"
+            node = str(local_node) if local_node.is_file() else "node"
+            return node, str(cand)
+    return None
+
+
+_OPENCODE_ENTRY = _opencode_entry()
+_SESSION_RE = re.compile(r'"sessionID":"(ses_[A-Za-z0-9]+)"')
+
+
+def _opencode_argv(*extra: str) -> list[str]:
+    if _OPENCODE_ENTRY is not None:
+        node, entry = _OPENCODE_ENTRY
+        return [node, entry, *extra]
+    return ["opencode", *extra]
+
+
+def _write_opencode_agent(work_dir: Path, agent_name: str, system_prompt: str) -> None:
+    """opencode discovers project agents in <cwd>/.opencode/agent/. Putting the
+    role in the agent's SYSTEM prompt (not the user message) is what stops small
+    models from roleplaying a greeting instead of doing the work."""
+    agent_dir = work_dir / ".opencode" / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    frontmatter = (
+        "---\n"
+        f"description: forge {agent_name}\n"
+        "mode: primary\n"
+        "temperature: 0.2\n"
+        "permission:\n"
+        "  bash: allow\n  edit: allow\n  write: allow\n  read: allow\n"
+        "  webfetch: deny\n  websearch: deny\n"
+        "---\n"
+    )
+    (agent_dir / f"{agent_name}.md").write_text(frontmatter + system_prompt, encoding="utf-8")
+
+
+def _opencode_export_text(session_id: str) -> str:
+    """`opencode export <id>` → last assistant message's text parts. (--format
+    json streams tool/step events but not final text, so we recover it here.)"""
+    try:
+        out = subprocess.run(
+            _opencode_argv("export", session_id),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=120, shell=False,
+        )
+    except subprocess.SubprocessError:
+        return ""
+    if out.returncode != 0:
+        return ""
+    brace = out.stdout.find("{")
+    if brace < 0:
+        return ""
+    try:
+        data = json.loads(out.stdout[brace:])
+    except json.JSONDecodeError:
+        return ""
+    for m in reversed(data.get("messages") or []):
+        if (m.get("info") or {}).get("role") == "assistant":
+            parts = m.get("parts") or []
+            return "\n".join(p.get("text", "") for p in parts if p.get("type") == "text")
+    return ""
+
+
+def _run_opencode_agent(
+    system_prompt: str, user_message: str, work_dir: Path, model: str,
+    log_path: Path, timeout_s: int, agent_name: str,
+) -> AgentRun:
+    _write_opencode_agent(work_dir, agent_name, system_prompt)
+    cmd = _opencode_argv(
+        "run", "--dangerously-skip-permissions",
+        "--dir", str(work_dir), "--agent", agent_name,
+        "-m", model, "--format", "json", user_message,
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    session_id: str | None = None
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            proc = subprocess.Popen(
+                cmd, cwd=str(work_dir), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                errors="replace", shell=False,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                log.write(line)
+                if session_id is None:
+                    match = _SESSION_RE.search(line)
+                    if match:
+                        session_id = match.group(1)
+            try:
+                proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                return AgentRun("", 0, 0.0, True, session_id, None, 0.0, error=f"timeout after {timeout_s}s")
+    except FileNotFoundError as e:
+        return AgentRun("", 0, 0.0, True, None, None, 0.0, error=f"opencode not found: {e}")
+
+    final = _opencode_export_text(session_id) if session_id else ""
+    return AgentRun(
+        final_text=final,
+        num_turns=0,
+        cost_usd=0.0,  # local model — no cloud cost
+        is_error=(proc.returncode != 0 and not final),
+        session_id=session_id,
+        exit_code=proc.returncode,
+        wall_seconds=0.0,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LM Studio auto-launch (so "Start" in Valinor just works for local runs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LMSTUDIO_BASE = "http://localhost:1234/v1"
+
+
+def _lmstudio_loaded_models() -> list[str] | None:
+    """Loaded model ids, or None if the LM Studio server isn't reachable."""
+    try:
+        with urllib.request.urlopen(_LMSTUDIO_BASE + "/models", timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        return [m.get("id", "") for m in data.get("data", [])]
+    except Exception:
+        return None
+
+
+def _run_lms(args: list[str], timeout: int) -> tuple[int, str]:
+    exe = shutil.which("lms") or "lms"
+    try:
+        if os.name == "nt":
+            # `lms` is a .cmd shim on Windows → go through the shell. Args are
+            # trusted (model id + numbers from config), so no injection surface.
+            proc = subprocess.run(
+                '"' + exe + '" ' + " ".join(args),
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=timeout, shell=True,
+            )
+        else:
+            proc = subprocess.run(
+                [exe, *args], capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=timeout, shell=False,
+            )
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except Exception as e:  # noqa: BLE001
+        return 1, str(e)
+
+
+def _lms_resident() -> list[dict]:
+    """Models currently loaded in memory (from `lms ps --json`)."""
+    rc, out = _run_lms(["ps", "--json"], 15)
+    if rc != 0:
+        return []
+    start = out.find("[")
+    if start < 0:
+        return []
+    try:
+        return json.loads(out[start:])
+    except json.JSONDecodeError:
+        return []
+
+
+def _model_key(m: dict) -> str:
+    return m.get("modelKey") or m.get("identifier") or ""
+
+
+def ensure_lmstudio_ready(model_id: str, context_length: int = 32768) -> tuple[bool, str]:
+    """Ensure the LM Studio server is up and ONLY the target model is resident,
+    at a large-enough context. Returns (ok, message).
+
+    Two gotchas this handles on a 16GB GPU:
+      - A model resident at LM Studio's 4096 default truncates our ~11K-token
+        prompts; /v1/models only says a model is *downloaded*, so we read the
+        resident contextLength via `lms ps --json` and reload when it's too small.
+      - Two big models can't coexist in 16GB, so we unload any OTHER resident
+        model before loading the target.
+    `model_id` is opencode-form; the LM Studio key drops the provider segment."""
+    lms_key = model_id.split("/", 1)[1] if model_id.startswith("lmstudio/") else model_id
+    last = lms_key.rsplit("/", 1)[-1]
+
+    # 1. server reachable?
+    if _lmstudio_loaded_models() is None:
+        rc, out = _run_lms(["server", "start"], 30)
+        if rc != 0:
+            return False, f"could not start LM Studio server (is `lms` installed?): {out.strip()[:200]}"
+        for _ in range(20):
+            time.sleep(1)
+            if _lmstudio_loaded_models() is not None:
+                break
+        if _lmstudio_loaded_models() is None:
+            return False, "LM Studio server did not become reachable on :1234"
+
+    # 2. free VRAM: unload any OTHER resident model (16GB can't host two).
+    resident = _lms_resident()
+    for m in resident:
+        key = _model_key(m)
+        if key and last not in key:
+            _run_lms(["unload", key], 30)
+
+    # 3. target resident at a big-enough context?
+    target = next((m for m in resident if last in _model_key(m)), None)
+    ctx = target.get("contextLength") if target else None
+    if isinstance(ctx, (int, float)) and ctx >= context_length:
+        return True, f"{lms_key} already loaded @ {int(ctx)} ctx"
+
+    if ctx is not None:
+        _run_lms(["unload", lms_key], 30)  # drop the too-small instance
+    rc, out = _run_lms(["load", lms_key, "-c", str(context_length), "--gpu", "max", "-y"], 240)
+    if rc != 0:
+        return False, f"`lms load {lms_key} -c {context_length}` failed: {out.strip()[:200]}"
+    return True, f"loaded {lms_key} @ {context_length} ctx"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

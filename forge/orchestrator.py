@@ -262,6 +262,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[forge] orchestrator: cli={CONFIG.agent_cli} model={CONFIG.agent_model()} "
           f"researcher={CONFIG.researcher_model}", flush=True)
 
+    # Auto-launch LM Studio for local runs so the Valinor "Start" button just
+    # works — start the server and load the model if they aren't already up.
+    if CONFIG.agent_cli == "lmstudio":
+        live.status("starting", "ensuring LM Studio is up + model loaded…")
+        from .agent_cli import ensure_lmstudio_ready
+        ok, msg = ensure_lmstudio_ready(CONFIG.agent_model(), CONFIG.lmstudio_context_length)
+        print(f"[forge] LM Studio: {msg}", flush=True)
+        if not ok:
+            live.status("error", f"LM Studio not ready: {msg}")
+            print(f"[forge] ABORT — {msg}", flush=True)
+            return 1
+
     # ── baseline: if we've never scored the seed champion, do that first.
     if champion_score is None:
         exp_id = _next_exp_id()

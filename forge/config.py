@@ -21,10 +21,14 @@ from typing import Literal
 Role = Literal["planner", "generator", "validator"]
 ROLES: tuple[Role, ...] = ("planner", "generator", "validator")
 
-# Which authed CLI drives the inner-loop agents. Toggle one per run (not both
-# in parallel). "claude" → Anthropic models via OAuth; "codex" → OpenAI/GPT via
-# the ChatGPT subscription.
-AgentCli = Literal["claude", "codex"]
+# What drives the inner-loop agents. Toggle one per run.
+#   "lmstudio" → a LOCAL model via opencode + LM Studio (default). Zero cloud
+#               tokens for the agents, and the prompts get tuned for what a
+#               small model can do — which is the deployment target.
+#   "claude"   → Anthropic models via OAuth (strong, cloud).
+#   "codex"    → OpenAI/GPT via the ChatGPT subscription.
+# The researcher (proposer + judge) is ALWAYS Opus regardless of this.
+AgentCli = Literal["lmstudio", "claude", "codex"]
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -79,9 +83,17 @@ class ForgeConfig:
     valinor_harness_file: Path = REPO_ROOT.parent / "valinor" / "src" / "runtime" / "agents" / "codexHarness.ts"
 
     # ───── inner-loop agent driver
-    # Toggle which authed CLI runs planner/generator/validator.
-    agent_cli: AgentCli = field(default_factory=lambda: _env("FORGE_AGENT_CLI", "claude"))  # type: ignore[assignment]
-    # Top-tier model per CLI (operator chose "Top / Opus-class").
+    # Default: local gpt-oss-20b via LM Studio — we iterate on the small model
+    # we deploy to, with no agent token cost.
+    agent_cli: AgentCli = field(default_factory=lambda: _env("FORGE_AGENT_CLI", "lmstudio"))  # type: ignore[assignment]
+    # Local model id as opencode addresses it (provider/model). qwen3.5-9b fits
+    # a 32K context comfortably in 16GB (gpt-oss-20b spills to shared mem at 32K
+    # → ~3x slower). Loaded automatically with a large context (LM Studio resets
+    # to 4096 on reload). Override via env.
+    agent_model_lmstudio: str = field(default_factory=lambda: _env("FORGE_LMSTUDIO_MODEL", "lmstudio/qwen/qwen3.5-9b"))
+    # Context window to load the local model with (LM Studio resets to 4096 on
+    # reload; our prompts are ~5-9K tokens so it needs to be generous).
+    lmstudio_context_length: int = field(default_factory=lambda: int(_env("FORGE_LMSTUDIO_CTX", "32768")))
     agent_model_claude: str = field(default_factory=lambda: _env("FORGE_CLAUDE_MODEL", "opus"))
     # codex's top coding model. VERIFY on first codex run; override via env.
     agent_model_codex: str = field(default_factory=lambda: _env("FORGE_CODEX_MODEL", "gpt-5.1-codex"))
@@ -122,10 +134,10 @@ class ForgeConfig:
     # benchmark takes `ref` seconds, → 1.0 as it gets faster, → 0 as it slows.
     # Calibrate to the observed baseline so the champion sits near 0.5 and has
     # headroom in BOTH directions. Override via FORGE_TIME_REF_SECONDS.
-    # Calibrated from the exp-0009 Opus baseline (~535s/benchmark) so the
-    # champion sits near speed 0.5 with headroom both ways. Re-tune if the
-    # agent model or benchmark set changes.
-    time_ref_seconds: float = field(default_factory=lambda: float(_env("FORGE_TIME_REF_SECONDS", "540")))
+    # Local pace: gpt-oss-20b/qwen took ~250-300s/benchmark in smokes, so the
+    # speed channel sits near 0.5 with headroom. Re-tune via FORGE_TIME_REF_SECONDS
+    # once a clean local baseline lands. (Was 540 for the Opus agent baseline.)
+    time_ref_seconds: float = field(default_factory=lambda: float(_env("FORGE_TIME_REF_SECONDS", "300")))
 
     # ───── stop condition (forge run)
     stop_score_threshold: float = 0.95
@@ -136,8 +148,12 @@ class ForgeConfig:
     dashboard_port: int = 7777
 
     def agent_model(self) -> str:
-        """Model id for the currently-toggled inner-loop CLI."""
-        return self.agent_model_codex if self.agent_cli == "codex" else self.agent_model_claude
+        """Model id for the currently-toggled inner-loop driver."""
+        if self.agent_cli == "lmstudio":
+            return self.agent_model_lmstudio
+        if self.agent_cli == "codex":
+            return self.agent_model_codex
+        return self.agent_model_claude
 
 
 CONFIG = ForgeConfig()

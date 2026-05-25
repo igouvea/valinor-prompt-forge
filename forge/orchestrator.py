@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import threading
 import time
 import traceback
 
@@ -261,6 +262,19 @@ def main(argv: list[str] | None = None) -> int:
 
     live = Live()
     live.hydrate_from_journal(journal)
+
+    # Heartbeat: refresh live.json every 15s so the app/dashboard keep seeing the
+    # loop as RUNNING during a long agent role (which fires no phase events for
+    # minutes). Without it, live.json goes stale and the app flips to IDLE.
+    def _heartbeat() -> None:
+        while True:
+            time.sleep(15)
+            try:
+                state.write_live(live.d)
+            except Exception:
+                pass
+
+    threading.Thread(target=_heartbeat, daemon=True).start()
 
     champion_prompts = ChampionPrompts.load(CONFIG.prompts_champion_dir)
     adopted_entries = [e for e in journal if e.get("adopted")]

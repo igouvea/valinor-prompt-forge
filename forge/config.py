@@ -142,6 +142,11 @@ class ForgeConfig:
     # converges. A healthy generator averages ~6 min, so 15 gives ample buffer
     # while cutting off runaway loops. Override via FORGE_ROLE_TIMEOUT_S.
     role_timeout_s: int = field(default_factory=lambda: int(_env("FORGE_ROLE_TIMEOUT_S", str(15 * 60))))
+    # If an agent subprocess produces no stdout/stderr for this long, treat it
+    # as stalled and kill the whole child process tree. Local opencode streams
+    # step/tool/token events during healthy work; silence usually means it is
+    # blocked in a tool or attached to the wrong workspace.
+    role_quiet_timeout_s: int = field(default_factory=lambda: int(_env("FORGE_ROLE_QUIET_TIMEOUT_S", "240")))
 
     # Max validator→generator rework rounds per benchmark. 1 means: planner once,
     # generator once, validator once. If validator FAILs, the cycle is over.

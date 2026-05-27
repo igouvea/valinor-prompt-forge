@@ -88,6 +88,15 @@ class ProgressTracker:
                 s["tps"] = round(tokens / s["seconds"], 1) if s["seconds"] > 0 and tokens else None
         _save_estimates(self.est)
 
+    def pulse(self, key: str, tokens: int = 0) -> None:
+        """Refresh a running step while a subprocess is still alive."""
+        for s in self.steps:
+            if s["key"] == key and s["status"] == "running" and s["_start"]:
+                s["seconds"] = round(time.time() - s["_start"], 1)
+                s["tokens"] = max(int(tokens or 0), int(s.get("tokens") or 0))
+                if s["tokens"] and s["seconds"] > 0:
+                    s["tps"] = round(s["tokens"] / s["seconds"], 1)
+
     def _finish(self, s: dict) -> None:
         if s["_start"]:
             s["seconds"] = round(time.time() - s["_start"], 1)
@@ -118,7 +127,13 @@ class ProgressTracker:
             "eta_seconds": round(eta, 1),
             "steps": [
                 {"label": s["label"], "type": s["type"], "status": s["status"],
-                 "seconds": s["seconds"], "tps": s.get("tps"),
+                 "seconds": round(now - s["_start"], 1) if s["status"] == "running" and s.get("_start") else s["seconds"],
+                 "tokens": int(s.get("tokens") or 0),
+                 "tps": (
+                     round((int(s.get("tokens") or 0)) / max(0.1, now - s["_start"]), 1)
+                     if s["status"] == "running" and s.get("_start") and s.get("tokens")
+                     else s.get("tps")
+                 ),
                  "avg": round(self.est.get(s["type"], 0.0), 1)}
                 for s in self.steps
             ],

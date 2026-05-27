@@ -22,6 +22,7 @@ import sys
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+from typing import Callable
 
 from .config import CONFIG, ROLES, Role
 from .agent_cli import run_agent
@@ -287,11 +288,22 @@ ROLE_PRIMARY_ARTIFACT: dict[Role, str] = {
 }
 
 
+def required_outputs_missing(role: Role, bench_dir: Path) -> list[str]:
+    """Required role outputs that are absent or empty in the benchmark dir."""
+    missing: list[str] = []
+    for rel in HANDOFF_OUTPUTS[role]:
+        path = bench_dir / rel
+        if not path.exists() or path.stat().st_size == 0:
+            missing.append(rel)
+    return missing
+
+
 def run_role(
     role: Role,
     prompts: ChampionPrompts,
     bench_dir: Path,
     exp_run_dir: Path,
+    on_progress: Callable[[int], None] | None = None,
 ) -> RoleResult:
     """Run one role against the benchmark via the authed CLI. Returns outputs."""
     system_prompt = _build_system_prompt(role, prompts)
@@ -306,6 +318,7 @@ def run_role(
         sys_prompt_file=sp_file,
         log_path=log_path,
         label=role,
+        on_progress=on_progress,
     )
 
     artifact_path = bench_dir / ROLE_PRIMARY_ARTIFACT[role]
@@ -426,6 +439,38 @@ def run_tests(bench_dir: Path) -> TestResult:
     )
 
 
+def _snapshot_final_state(bench_dir: Path, bench_run_dir: Path) -> None:
+    """Capture generated state before golden tests are injected."""
+    snapshot_dir = bench_run_dir / "final-state"
+    snapshot_dir.mkdir(exist_ok=True)
+    for name in [".valinor", "src", "bin", "tests"]:
+        src = bench_dir / name
+        if src.exists():
+            dst = snapshot_dir / name
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+
+
+def _blocked_result(
+    benchmark: str,
+    bench_dir: Path,
+    bench_run_dir: Path,
+    roles: list[RoleResult],
+    cycles: int,
+    reason: str,
+) -> BenchmarkResult:
+    _snapshot_final_state(bench_dir, bench_run_dir)
+    return BenchmarkResult(
+        benchmark=benchmark,
+        cycles=cycles,
+        verdict="unknown",
+        test=TestResult(0, 0, 0, raw_stdout="", raw_stderr=reason, failed_names=[reason]),
+        roles=roles,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public: one experiment
 # ─────────────────────────────────────────────────────────────────────────────
@@ -460,37 +505,49 @@ def run_one_benchmark(
 
     # planner once, then generator+validator up to max_rework_rounds times.
     _emit("planner", "start")
-    planner_res = run_role("planner", prompts, bench_dir, bench_run_dir)
+    planner_res = run_role(
+        "planner", prompts, bench_dir, bench_run_dir,
+        on_progress=lambda tokens: _emit("planner", "progress", tokens),
+    )
     roles.append(planner_res)
     _emit("planner", "done", planner_res)
+    missing = required_outputs_missing("planner", bench_dir)
+    if planner_res.error or missing:
+        reason = planner_res.error or f"planner missing required output(s): {', '.join(missing)}"
+        return _blocked_result(benchmark, bench_dir, bench_run_dir, roles, cycles, reason)
 
     for _round_idx in range(1, CONFIG.max_rework_rounds + 1):
         cycles += 1
         _emit("generator", "start")
-        gen_res = run_role("generator", prompts, bench_dir, bench_run_dir)
+        gen_res = run_role(
+            "generator", prompts, bench_dir, bench_run_dir,
+            on_progress=lambda tokens: _emit("generator", "progress", tokens),
+        )
         roles.append(gen_res)
         _emit("generator", "done", gen_res)
+        missing = required_outputs_missing("generator", bench_dir)
+        if gen_res.error or missing:
+            reason = gen_res.error or f"generator missing required output(s): {', '.join(missing)}"
+            return _blocked_result(benchmark, bench_dir, bench_run_dir, roles, cycles, reason)
 
         _emit("validator", "start")
-        val_res = run_role("validator", prompts, bench_dir, bench_run_dir)
+        val_res = run_role(
+            "validator", prompts, bench_dir, bench_run_dir,
+            on_progress=lambda tokens: _emit("validator", "progress", tokens),
+        )
         roles.append(val_res)
         verdict = parse_verdict(val_res.final_message)
         _emit("validator", "done", val_res)
+        missing = required_outputs_missing("validator", bench_dir)
+        if val_res.error or missing:
+            verdict = "unknown"
+            break
         if verdict == "pass":
             break
 
     # Snapshot the benchmark's final state FIRST — this captures the agent's own
     # code + tests before run_tests() swaps in the held-out golden suite.
-    snapshot_dir = bench_run_dir / "final-state"
-    snapshot_dir.mkdir(exist_ok=True)
-    for name in [".valinor", "src", "bin", "tests"]:
-        src = bench_dir / name
-        if src.exists():
-            dst = snapshot_dir / name
-            if src.is_dir():
-                shutil.copytree(src, dst, dirs_exist_ok=True)
-            else:
-                shutil.copy2(src, dst)
+    _snapshot_final_state(bench_dir, bench_run_dir)
 
     # Score on the held-out golden tests (true correctness, not self-consistency).
     test = run_tests(bench_dir)

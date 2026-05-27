@@ -34,6 +34,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .config import CONFIG
 
@@ -90,6 +91,25 @@ def _nomcp_config() -> Path:
     return _NOMCP_PATH
 
 
+def isolated_agent_env(work_dir: Path) -> dict[str, str]:
+    """Environment for benchmark-scoped agent subprocesses.
+
+    opencode discovers a workspace by walking up to the nearest Git root. The
+    benchmark dirs are nested inside the forge repo, so without a ceiling it can
+    promote the workspace to valinor-prompt-forge and read the forge-level
+    `.valinor/` state instead of the benchmark-local one. The ceiling keeps the
+    agent rooted at the requested benchmark dir.
+    """
+    env = dict(os.environ)
+    env.pop("VALINOR_PROJECT_ROOT", None)
+    env["VALINOR_FORGE_MODE"] = "1"
+    env["VALINOR_FORGE_BENCHMARK_ROOT"] = str(work_dir)
+    env["GIT_CEILING_DIRECTORIES"] = str(work_dir.parent)
+    env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("NO_COLOR", "1")
+    return env
+
+
 # Tools to explicitly deny for researcher (no-tool reasoning) calls. Listing the
 # built-ins keeps the prompt self-contained and avoids wasted denied turns.
 _RESEARCHER_DISALLOW = (
@@ -105,7 +125,7 @@ _RESEARCHER_DISALLOW = (
 
 def _run(
     argv: list[str], *, cwd: Path | None, log_path: Path, timeout_s: int,
-    stdin_text: str | None = None,
+    stdin_text: str | None = None, env: dict[str, str] | None = None,
 ) -> tuple[int | None, str]:
     """Run argv (shell=False), tee stdout+stderr to log_path, return (exit, stdout).
 
@@ -124,6 +144,7 @@ def _run(
             errors="replace",
             timeout=timeout_s,
             shell=False,
+            env=env,
         )
     except subprocess.TimeoutExpired as e:
         body = (e.stdout or "") if isinstance(e.stdout, str) else ""
@@ -172,6 +193,36 @@ def _parse_codex_jsonl_final(stdout: str) -> str:
     return last_text
 
 
+def _stop_requested() -> bool:
+    try:
+        from . import state
+        return state.stop_requested()
+    except Exception:
+        return False
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Best-effort termination for a CLI plus its spawned tool children."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                shell=False,
+            )
+            return
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public: inner-loop coding agent
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,6 +239,7 @@ def run_agent(
     model: str | None = None,
     timeout_s: int | None = None,
     label: str = "agent",
+    on_progress: Callable[[int], None] | None = None,
 ) -> AgentRun:
     """Run a tool-using coding agent inside `work_dir`. Returns its final text +
     turn/cost stats. The role's system prompt is written to `sys_prompt_file`.
@@ -203,7 +255,7 @@ def run_agent(
     if cli == "lmstudio":
         run = _run_opencode_agent(
             system_prompt, user_message, work_dir, model, log_path, timeout_s,
-            agent_name=f"forge-{label}",
+            agent_name=f"forge-{label}", on_progress=on_progress,
         )
     elif cli == "codex":
         run = _run_codex_agent(user_message, system_prompt, work_dir, model, log_path, timeout_s)
@@ -228,7 +280,10 @@ def _run_claude_agent(
         "--allowedTools", " ".join(CONFIG.agent_allowed_tools),
         "--max-budget-usd", str(CONFIG.agent_max_budget_usd),
     ]
-    exit_code, stdout = _run(argv, cwd=work_dir, log_path=log_path, timeout_s=timeout_s)
+    exit_code, stdout = _run(
+        argv, cwd=work_dir, log_path=log_path, timeout_s=timeout_s,
+        env=isolated_agent_env(work_dir),
+    )
     if exit_code is None:
         return AgentRun("", 0, 0.0, True, None, None, 0.0, error=f"timeout after {timeout_s}s")
     try:
@@ -265,7 +320,10 @@ def _run_codex_agent(
         "--full-auto",
         "--json",
     ]
-    exit_code, stdout = _run(argv, cwd=work_dir, log_path=log_path, timeout_s=timeout_s, stdin_text=combined)
+    exit_code, stdout = _run(
+        argv, cwd=work_dir, log_path=log_path, timeout_s=timeout_s,
+        stdin_text=combined, env=isolated_agent_env(work_dir),
+    )
     if exit_code is None:
         return AgentRun("", 0, 0.0, True, None, None, 0.0, error=f"timeout after {timeout_s}s")
     text = _parse_codex_jsonl_final(stdout)
@@ -358,6 +416,7 @@ def _opencode_export_text(session_id: str) -> str:
 def _run_opencode_agent(
     system_prompt: str, user_message: str, work_dir: Path, model: str,
     log_path: Path, timeout_s: int, agent_name: str,
+    on_progress: Callable[[int], None] | None = None,
 ) -> AgentRun:
     _write_opencode_agent(work_dir, agent_name, system_prompt)
     cmd = _opencode_argv(
@@ -373,41 +432,54 @@ def _run_opencode_agent(
             proc = subprocess.Popen(
                 cmd, cwd=str(work_dir), stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                errors="replace", shell=False,
+                errors="replace", shell=False, env=isolated_agent_env(work_dir),
             )
             assert proc.stdout is not None
-            # The read loop below blocks until the subprocess stops streaming, so
-            # a post-loop proc.wait(timeout=) never fires while a runaway agent is
-            # still emitting tokens — the wall-clock cap would be dead code. Use a
-            # watchdog that kills the process at the deadline; killing it closes
-            # stdout, which unblocks the read loop and lets us return cleanly.
-            timed_out = threading.Event()
+            stop_reason: dict[str, str | None] = {"value": None}
+            last_output_at = {"value": time.time()}
+            quiet_timeout_s = max(0, CONFIG.role_quiet_timeout_s)
+            deadline = time.time() + timeout_s
 
             def _watchdog() -> None:
-                timed_out.set()
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                while proc.poll() is None:
+                    now = time.time()
+                    reason: str | None = None
+                    if _stop_requested():
+                        reason = "stop requested"
+                    elif now >= deadline:
+                        reason = f"timeout after {timeout_s}s"
+                    elif quiet_timeout_s and now - last_output_at["value"] >= quiet_timeout_s:
+                        reason = f"quiet timeout after {quiet_timeout_s}s with no opencode output"
+                    if reason:
+                        stop_reason["value"] = reason
+                        _kill_process_tree(proc)
+                        return
+                    time.sleep(1)
 
-            watchdog = threading.Timer(timeout_s, _watchdog)
+            watchdog = threading.Thread(target=_watchdog, daemon=True)
             watchdog.daemon = True
             watchdog.start()
             try:
                 for line in proc.stdout:
+                    last_output_at["value"] = time.time()
                     log.write(line)
+                    log.flush()
                     if session_id is None:
                         match = _SESSION_RE.search(line)
                         if match:
                             session_id = match.group(1)
                     for m in _OPENCODE_TOK_RE.finditer(line):  # sum per-turn output+reasoning
                         tokens_out += int(m.group(1)) + int(m.group(2))
+                    if on_progress:
+                        on_progress(tokens_out)
                 proc.wait()
             finally:
-                watchdog.cancel()
-            if timed_out.is_set():
-                log.write(f"\n[forge] TIMEOUT after {timeout_s}s — killed runaway agent\n")
-                return AgentRun("", 0, 0.0, True, session_id, None, 0.0, tokens_out, f"timeout after {timeout_s}s")
+                pass
+            if stop_reason["value"]:
+                reason = stop_reason["value"] or "stopped"
+                log.write(f"\n[forge] {reason} — killed agent process tree\n")
+                log.flush()
+                return AgentRun("", 0, 0.0, True, session_id, None, 0.0, tokens_out, reason)
     except FileNotFoundError as e:
         return AgentRun("", 0, 0.0, True, None, None, 0.0, 0, f"opencode not found: {e}")
 

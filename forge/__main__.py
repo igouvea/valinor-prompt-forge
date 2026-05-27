@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "stop":
         from . import state
         state.request_stop()
-        print("[forge] stop requested — the loop will exit after the current experiment.")
+        print("[forge] stop requested — the active role will be terminated and the loop will exit.")
         return 0
     if cmd == "dashboard":
         from . import dashboard

@@ -147,6 +147,8 @@ def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live,
         if tracker is not None:
             if phase == "start":
                 tracker.start(f"{bench}/{role}")
+            elif phase == "progress":
+                tracker.pulse(f"{bench}/{role}", tokens=int(result or 0))
             elif phase == "done":
                 tracker.done(f"{bench}/{role}", tokens=getattr(result, "tokens_out", 0) or 0)
         if phase == "done" and result is not None:

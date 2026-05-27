@@ -236,7 +236,8 @@ function renderProgress(s){
   $("prog-steps").innerHTML = head + (p.steps||[]).map(st=>{
     const ico = st.status==="done" ? "✓" : (st.status==="running" ? "▶" : "·");
     const dur = st.seconds ? fmtDur(st.seconds) : (st.status==="running" ? fmtDur(curEl) : "");
-    const tps = (st.tps!=null) ? `${st.tps} tok/s` : (st.status==="running" ? "…" : "");
+    const tok = st.tokens ? ` · ${st.tokens} tok` : "";
+    const tps = (st.tps!=null) ? `${st.tps} tok/s${tok}` : (st.status==="running" ? `…${tok}` : "");
     const avg = st.avg ? `avg ${fmtDur(st.avg)}` : "";
     return `<div class="step ${st.status}"><span class="ico">${ico}</span>`
       + `<span class="lbl">${st.label}</span>`

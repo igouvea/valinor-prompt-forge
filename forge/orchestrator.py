@@ -31,6 +31,7 @@ from .judge import score_experiment, RubricResult
 from .scorer import Score, compute_score, beats
 from .proposer import propose, build_context_md
 from .progress import ProgressTracker
+from .quality import experiment_has_positive_tests, score_has_positive_tests, usable_journal_entries
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,7 +114,8 @@ class Live:
         state.write_live(self.d)
 
     def hydrate_from_journal(self, journal: list[dict]) -> None:
-        adopted = [e for e in journal if e.get("adopted")]
+        usable = usable_journal_entries(journal)
+        adopted = [e for e in usable if e.get("adopted")]
         if adopted:
             last = adopted[-1]
             self.d["champion"] = {
@@ -121,14 +123,14 @@ class Live:
                 "score": last.get("score", 0.0),
                 "breakdown": last.get("breakdown", {}),
             }
-        self.d["totals"]["experiments"] = len(journal)
+        self.d["totals"]["experiments"] = len(usable)
         self.d["totals"]["adopted"] = len(adopted)
-        self.d["totals"]["cost_usd"] = round(sum(e.get("cost_usd", 0.0) for e in journal), 4)
-        self.d["best_score"] = max((e.get("score", 0.0) for e in journal), default=0.0)
+        self.d["totals"]["cost_usd"] = round(sum(e.get("cost_usd", 0.0) for e in usable), 4)
+        self.d["best_score"] = max((e.get("score", 0.0) for e in usable), default=0.0)
         self.d["history"] = [
             {k: e.get(k) for k in ("exp_id", "score", "adopted", "hypothesis",
                                    "breakdown", "cost_usd", "finished_at")}
-            for e in journal[-200:]
+            for e in usable[-200:]
         ]
         state.write_live(self.d)
 
@@ -175,7 +177,10 @@ def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live,
             live.d["progress"] = tracker.to_dict()
         live.status("judging", f"{exp_id}: judging {bench}")
 
-    rubric_mean, rubrics = score_experiment(exp, on_judge=on_judge)
+    if experiment_has_positive_tests(exp):
+        rubric_mean, rubrics = score_experiment(exp, on_judge=on_judge)
+    else:
+        rubric_mean, rubrics = 0.0, []
     score = compute_score(exp, rubric_mean)
     live.tracker = None
     live.d["current_exp"] = None
@@ -219,6 +224,7 @@ def _record(live: Live, entry: dict, journal: list[dict]) -> None:
 
 
 def _write_progress(journal: list[dict], live: Live) -> None:
+    usable = usable_journal_entries(journal)
     champ = live.d.get("champion") or {}
     lines = [
         "# forge progress",
@@ -240,7 +246,7 @@ def _write_progress(journal: list[dict], live: Live) -> None:
         "| exp | score | tests | speed | rubric | time/bench | adopted | hypothesis |",
         "| --- | ----- | ----- | ----- | ------ | ---------- | ------- | ---------- |",
     ]
-    for e in reversed(journal[-50:]):
+    for e in reversed(usable[-50:]):
         bd = e.get("breakdown", {})
         hyp = (e.get("hypothesis") or "").replace("\n", " ").replace("|", "/")[:80]
         speed = bd.get("speed", bd.get("cycles", 0))
@@ -289,6 +295,7 @@ def _rotate_entry(exp_id: str, bench: str, score: Score, adopted: bool,
 def _update_rotate_live(live: Live, journal: list[dict], champion_scores: dict[str, Score]) -> None:
     live.hydrate_from_journal(journal)
     agg = _agg(champion_scores)
+    usable = usable_journal_entries(journal)
     if champion_scores:
         n = len(champion_scores)
         live.d["champion"] = {
@@ -304,7 +311,7 @@ def _update_rotate_live(live: Live, journal: list[dict], champion_scores: dict[s
             "speed": round(s.speed, 3), "rubric": round(s.rubric, 3)}
         for b, s in champion_scores.items()
     }
-    live.d["best_score"] = round(max([agg] + [e.get("aggregate", 0.0) for e in journal], default=agg), 4)
+    live.d["best_score"] = round(max([agg] + [e.get("aggregate", 0.0) for e in usable], default=agg), 4)
     state.write_live(live.d)
 
 
@@ -317,7 +324,7 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
     done = 0
 
     # Resume per-benchmark champions from the journal (last adopted per benchmark).
-    for e in journal:
+    for e in usable_journal_entries(journal):
         b = e.get("benchmark")
         if b in benchmarks and e.get("adopted"):
             champion_scores[b] = _score_from_entry(e)
@@ -340,13 +347,19 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
             return 1
         rub_by = {r.benchmark: r for r in rubrics}
         cost = exp.total_cost_usd + sum(r.cost_usd for r in rubrics)
+        baseline_scores: dict[str, Score] = {}
         for b in exp.benchmarks:
             sc = _single_score(b, rub_by.get(b.benchmark))
-            champion_scores[b.benchmark] = sc
-            bench_ctx[b.benchmark] = (exp, [rub_by.get(b.benchmark)], sc)
+            baseline_scores[b.benchmark] = sc
+            if score_has_positive_tests(sc):
+                champion_scores[b.benchmark] = sc
+                bench_ctx[b.benchmark] = (exp, [rub_by.get(b.benchmark)], sc)
         for b in exp.benchmarks:
-            entry = _rotate_entry(exp_id, b.benchmark, champion_scores[b.benchmark], True,
+            sc = baseline_scores[b.benchmark]
+            entry = _rotate_entry(exp_id, b.benchmark, sc, score_has_positive_tests(sc),
                                   "baseline (seed prompts)", _agg(champion_scores), "baseline", cost / n)
+            if not score_has_positive_tests(sc):
+                entry["discarded_reason"] = "zero test grade; omitted from proposer context and champion history"
             state.append_journal(entry)
             journal.append(entry)
         done += 1
@@ -379,8 +392,9 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
         live.status("proposing", f"{exp_id}: proposing for {bench}")
         ctx = bench_ctx.get(bench)
         context_md = build_context_md(ctx[0], ctx[1], ctx[2]) if ctx else "# No prior context.\n"
+        proposer_journal = usable_journal_entries(state.read_journal(limit=36))[-12:]
         proposal = propose(candidate_dir=run_dir / "candidate", champion=champion_prompts,
-                           journal_entries=state.read_journal(limit=12), context_md=context_md, log_dir=run_dir)
+                           journal_entries=proposer_journal, context_md=context_md, log_dir=run_dir)
         tracker.done("propose", tokens=proposal.tokens_out)
         live.d["progress"] = tracker.to_dict()
         if proposal.error:
@@ -395,14 +409,18 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
             live.status("error", f"{exp_id}: experiment failed"); time.sleep(5); continue
 
         champ = champion_scores.get(bench)
-        won = beats(score, champ)
+        valid_score = score_has_positive_tests(score)
+        won = valid_score and beats(score, champ)
         if won:
             _adopt(proposal.prompts)
             champion_prompts = proposal.prompts
             champion_scores[bench] = score
-        bench_ctx[bench] = (exp, rubrics, score)
+        if valid_score:
+            bench_ctx[bench] = (exp, rubrics, score)
         cost = exp.total_cost_usd + proposal.cost_usd + sum(r.cost_usd for r in rubrics)
         entry = _rotate_entry(exp_id, bench, score, won, proposal.hypothesis, _agg(champion_scores), "rotate", cost)
+        if not valid_score:
+            entry["discarded_reason"] = "zero test grade; omitted from proposer context and champion history"
         state.append_journal(entry); journal.append(entry)
         done += 1
         _update_rotate_live(live, journal, champion_scores)
@@ -421,8 +439,9 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
                 rub_by = {r.benchmark: r for r in crubrics}
                 for b in cexp.benchmarks:
                     sc = _single_score(b, rub_by.get(b.benchmark))
-                    champion_scores[b.benchmark] = sc
-                    bench_ctx[b.benchmark] = (cexp, [rub_by.get(b.benchmark)], sc)
+                    if score_has_positive_tests(sc):
+                        champion_scores[b.benchmark] = sc
+                        bench_ctx[b.benchmark] = (cexp, [rub_by.get(b.benchmark)], sc)
                 cost = cexp.total_cost_usd + sum(r.cost_usd for r in crubrics)
                 entry = _rotate_entry(ckpt_id, "ALL", Score(_agg(champion_scores), 0, 0, 0, 0.0, 0),
                                       False, "global checkpoint (champion re-evaluated on all)",
@@ -491,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(target=_heartbeat, daemon=True).start()
 
     champion_prompts = ChampionPrompts.load(CONFIG.prompts_champion_dir)
-    adopted_entries = [e for e in journal if e.get("adopted")]
+    adopted_entries = [e for e in usable_journal_entries(journal) if e.get("adopted")]
     champion_score: Score | None = _score_from_entry(adopted_entries[-1]) if adopted_entries else None
     best_total = live.d["best_score"]
     plateau = 0
@@ -533,11 +552,15 @@ def main(argv: list[str] | None = None) -> int:
             live.status("error", f"baseline failed: {e}")
             return 1
         judge_cost = sum(r.cost_usd for r in rubrics)
-        champion_score = score
-        best_total = score.total
-        entry = _journal_entry(exp, score, adopted=True,
+        baseline_adopted = score_has_positive_tests(score)
+        if baseline_adopted:
+            champion_score = score
+            best_total = score.total
+        entry = _journal_entry(exp, score, adopted=baseline_adopted,
                                hypothesis="baseline (seed prompts, unchanged)",
                                changes_summary="—", proposer_cost=0.0, judge_cost=judge_cost)
+        if not baseline_adopted:
+            entry["discarded_reason"] = "zero test grade; omitted from proposer context and champion history"
         _record(live, entry, journal)
         done += 1
         print(f"[forge] baseline score={score.total:.3f} "
@@ -574,10 +597,11 @@ def main(argv: list[str] | None = None) -> int:
         live.status("proposing", f"{exp_id}: proposing mutation")
         context_md = (build_context_md(latest_exp, latest_rubrics, latest_score)
                       if latest_exp is not None else "# No prior experiment context.\n")
+        proposer_journal = usable_journal_entries(state.read_journal(limit=36))[-12:]
         proposal = propose(
             candidate_dir=run_dir / "candidate",
             champion=champion_prompts,
-            journal_entries=state.read_journal(limit=12),
+            journal_entries=proposer_journal,
             context_md=context_md,
             log_dir=run_dir,
         )
@@ -600,10 +624,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         judge_cost = sum(r.cost_usd for r in rubrics)
-        latest_exp, latest_rubrics, latest_score = exp, rubrics, score
+        valid_score = score_has_positive_tests(score)
+        if valid_score:
+            latest_exp, latest_rubrics, latest_score = exp, rubrics, score
 
         # 4. ratchet
-        won = beats(score, champion_score)
+        won = valid_score and beats(score, champion_score)
         if won:
             _adopt(proposal.prompts)
             champion_prompts = proposal.prompts
@@ -618,6 +644,8 @@ def main(argv: list[str] | None = None) -> int:
         entry = _journal_entry(exp, score, adopted=won, hypothesis=proposal.hypothesis,
                                changes_summary=proposal.hypothesis[:120],
                                proposer_cost=proposal.cost_usd, judge_cost=judge_cost)
+        if not valid_score:
+            entry["discarded_reason"] = "zero test grade; omitted from proposer context and champion history"
         _record(live, entry, journal)
         done += 1
 

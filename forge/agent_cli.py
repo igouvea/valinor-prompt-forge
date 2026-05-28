@@ -101,7 +101,7 @@ def isolated_agent_env(work_dir: Path) -> dict[str, str]:
     agent rooted at the requested benchmark dir.
     """
     env = dict(os.environ)
-    env.pop("VALINOR_PROJECT_ROOT", None)
+    env["VALINOR_PROJECT_ROOT"] = str(work_dir)
     env["VALINOR_FORGE_MODE"] = "1"
     env["VALINOR_FORGE_BENCHMARK_ROOT"] = str(work_dir)
     env["GIT_CEILING_DIRECTORIES"] = str(work_dir.parent)
@@ -413,6 +413,33 @@ def _opencode_export_text(session_id: str) -> str:
     return ""
 
 
+def _opencode_logged_error(log_path: Path) -> str | None:
+    """Return a concise opencode error found in the JSON event log."""
+    if not log_path.exists():
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "Context size has been exceeded" in text:
+        return "Context size has been exceeded"
+    for line in reversed(text.splitlines()):
+        if '"type":"error"' not in line and '"error":' not in line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        err = data.get("error") or {}
+        if isinstance(err, dict):
+            msg = (err.get("data") or {}).get("message") or err.get("message")
+            if msg:
+                return str(msg)
+        if isinstance(err, str) and err:
+            return err
+    return None
+
+
 def _run_opencode_agent(
     system_prompt: str, user_message: str, work_dir: Path, model: str,
     log_path: Path, timeout_s: int, agent_name: str,
@@ -484,15 +511,17 @@ def _run_opencode_agent(
         return AgentRun("", 0, 0.0, True, None, None, 0.0, 0, f"opencode not found: {e}")
 
     final = _opencode_export_text(session_id) if session_id else ""
+    logged_error = _opencode_logged_error(log_path)
     return AgentRun(
         final_text=final,
         num_turns=0,
         cost_usd=0.0,  # local model — no cloud cost
-        is_error=(proc.returncode != 0 and not final),
+        is_error=bool(logged_error) or (proc.returncode != 0 and not final),
         session_id=session_id,
         exit_code=proc.returncode,
         wall_seconds=0.0,
         tokens_out=tokens_out,
+        error=logged_error,
     )
 
 

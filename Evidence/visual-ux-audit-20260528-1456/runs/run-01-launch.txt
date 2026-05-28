@@ -1,0 +1,7 @@
+﻿Command: python -m forge dashboard
+Working directory: C:\Users\ivang\Desktop\coding_projects\valinor-prompt-forge
+WindowStyle: Hidden
+PID: 39788
+Started: 2026-05-28T14:56:43.4608646-03:00
+Stdout: C:\Users\ivang\Desktop\coding_projects\valinor-prompt-forge\Evidence\visual-ux-audit-20260528-1456\logs\dashboard.stdout.log
+Stderr: C:\Users\ivang\Desktop\coding_projects\valinor-prompt-forge\Evidence\visual-ux-audit-20260528-1456\logs\dashboard.stderr.log

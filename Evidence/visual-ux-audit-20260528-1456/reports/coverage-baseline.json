@@ -1,0 +1,10 @@
+﻿{
+  "coverageMode": "Full Baseline",
+  "items": [
+    {"area":"App","feature":"Dashboard launch","status":"Working","evidence":"annotated-screenshots/annotated-01-launch-desktop.png"},
+    {"area":"Controls","feature":"Stop button","status":"Working","evidence":"annotated-screenshots/annotated-02-stop-click.png"},
+    {"area":"Data","feature":"Experiment detail","status":"Working","evidence":"annotated-screenshots/annotated-03-experiment-detail-after-refresh.png"},
+    {"area":"Layout","feature":"Narrow viewport","status":"Working","evidence":"annotated-screenshots/annotated-04-narrow-viewport.png"},
+    {"area":"Input","feature":"Steer send","status":"Untested","reason":"Skipped to avoid mutating live queue"}
+  ]
+}

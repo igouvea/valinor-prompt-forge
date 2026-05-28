@@ -32,6 +32,7 @@ from dataclasses import dataclass
 
 from .config import CONFIG
 from .experiment import ExperimentResult
+from .quality import experiment_has_positive_tests
 
 
 @dataclass(frozen=True)
@@ -62,9 +63,18 @@ def compute_score(experiment: ExperimentResult, rubric_score: float) -> Score:
     `rubric_score` must already be normalized to [0, 1]. judge.py is
     responsible for that normalization.
     """
-    rubric_score = max(0.0, min(1.0, rubric_score))
     test_rate = experiment.aggregate_pass_rate
     mean_seconds = experiment.mean_benchmark_wall_seconds
+    if not experiment_has_positive_tests(experiment):
+        return Score(
+            total=0.0,
+            tests=0.0,
+            speed=0.0,
+            rubric=0.0,
+            raw_wall_seconds=mean_seconds,
+            raw_total_cycles=experiment.total_cycles,
+        )
+    rubric_score = max(0.0, min(1.0, rubric_score))
     spd = time_efficiency(mean_seconds)
     w = CONFIG.weights
     total = w.tests * test_rate + w.speed * spd + w.rubric * rubric_score

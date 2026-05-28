@@ -1,0 +1,2210 @@
+﻿diff --git a/benchmarks/expr-eval/package.json b/benchmarks/expr-eval/package.json
+index 665a19f..b34adb0 100644
+--- a/benchmarks/expr-eval/package.json
++++ b/benchmarks/expr-eval/package.json
+@@ -1,12 +1,58 @@
+ {
+-  "name": "expr-eval-benchmark",
+-  "private": true,
+-  "version": "0.0.1",
+   "type": "module",
++  "name": "expr-eval",
++  "version": "0.2.6",
++  "description": "Expression evaluator with precedence, associativity testing",
+   "scripts": {
+-    "test": "vitest run"
++    "test": "vitest run --config=test/vitest.config.mjs",
++    "coverage": "vitest run --coverage --config=test/vitest.config.mjs"
+   },
++  "keywords": [
++    "expression",
++    "evaluator",
++    "calculator"
++  ],
++  "author": "",
++  "license": "MIT",
+   "devDependencies": {
+-    "vitest": "^2.1.9"
++    "@vitest/coverage-v8": "^2.1.3",
++    "jsdom": "^26.1.0",
++    "vitest": "^2.1.3"
++  },
++  "main": "debug-test.js",
++  "directories": {
++    "lib": "lib",
++    "test": "tests"
++  },
++  "dependencies": {
++    "assertion-error": "^2.0.1",
++    "chai": "^6.2.2",
++    "convert-source-map": "^2.0.0",
++    "detect-libc": "^2.1.2",
++    "es-module-lexer": "^2.1.0",
++    "estree-walker": "^3.0.3",
++    "expect-type": "^1.3.0",
++    "fdir": "^6.5.0",
++    "lightningcss": "^1.32.0",
++    "lightningcss-win32-x64-msvc": "^1.32.0",
++    "magic-string": "^0.30.21",
++    "nanoid": "^3.3.12",
++    "obug": "^2.1.1",
++    "pathe": "^2.0.3",
++    "picocolors": "^1.1.1",
++    "picomatch": "^4.0.4",
++    "postcss": "^8.5.15",
++    "rolldown": "^1.0.2",
++    "siginfo": "^2.0.0",
++    "source-map-js": "^1.2.1",
++    "stackback": "^0.0.2",
++    "std-env": "^4.1.0",
++    "tinybench": "^2.9.0",
++    "tinyexec": "^1.2.2",
++    "tinyglobby": "^0.2.16",
++    "tinyrainbow": "^3.1.0",
++    "tslib": "^2.8.1",
++    "vite": "^8.0.14",
++    "why-is-node-running": "^2.3.0"
+   }
+ }
+diff --git a/benchmarks/json-patch/package.json b/benchmarks/json-patch/package.json
+index b2920e0..7ff361d 100644
+--- a/benchmarks/json-patch/package.json
++++ b/benchmarks/json-patch/package.json
+@@ -1,12 +1,13 @@
+ {
+-  "name": "json-patch-benchmark",
+-  "private": true,
+-  "version": "0.0.1",
++  "name": "json-patch",
++  "version": "1.0.0",
++  "main": "src/index.js",
+   "type": "module",
+   "scripts": {
+-    "test": "vitest run"
++    "test": "vitest run src/index.js"
+   },
+   "devDependencies": {
+-    "vitest": "^2.1.9"
++    "vitest": "^3.0.0",
++    "@types/node": "^24.0.0"
+   }
+ }
+diff --git a/forge/agent_cli.py b/forge/agent_cli.py
+index 8568279..89ac011 100644
+--- a/forge/agent_cli.py
++++ b/forge/agent_cli.py
+@@ -101,7 +101,7 @@ def isolated_agent_env(work_dir: Path) -> dict[str, str]:
+     agent rooted at the requested benchmark dir.
+     """
+     env = dict(os.environ)
+-    env.pop("VALINOR_PROJECT_ROOT", None)
++    env["VALINOR_PROJECT_ROOT"] = str(work_dir)
+     env["VALINOR_FORGE_MODE"] = "1"
+     env["VALINOR_FORGE_BENCHMARK_ROOT"] = str(work_dir)
+     env["GIT_CEILING_DIRECTORIES"] = str(work_dir.parent)
+@@ -413,6 +413,33 @@ def _opencode_export_text(session_id: str) -> str:
+     return ""
+ 
+ 
++def _opencode_logged_error(log_path: Path) -> str | None:
++    """Return a concise opencode error found in the JSON event log."""
++    if not log_path.exists():
++        return None
++    try:
++        text = log_path.read_text(encoding="utf-8", errors="replace")
++    except OSError:
++        return None
++    if "Context size has been exceeded" in text:
++        return "Context size has been exceeded"
++    for line in reversed(text.splitlines()):
++        if '"type":"error"' not in line and '"error":' not in line:
++            continue
++        try:
++            data = json.loads(line)
++        except json.JSONDecodeError:
++            continue
++        err = data.get("error") or {}
++        if isinstance(err, dict):
++            msg = (err.get("data") or {}).get("message") or err.get("message")
++            if msg:
++                return str(msg)
++        if isinstance(err, str) and err:
++            return err
++    return None
++
++
+ def _run_opencode_agent(
+     system_prompt: str, user_message: str, work_dir: Path, model: str,
+     log_path: Path, timeout_s: int, agent_name: str,
+@@ -484,15 +511,17 @@ def _run_opencode_agent(
+         return AgentRun("", 0, 0.0, True, None, None, 0.0, 0, f"opencode not found: {e}")
+ 
+     final = _opencode_export_text(session_id) if session_id else ""
++    logged_error = _opencode_logged_error(log_path)
+     return AgentRun(
+         final_text=final,
+         num_turns=0,
+         cost_usd=0.0,  # local model — no cloud cost
+-        is_error=(proc.returncode != 0 and not final),
++        is_error=bool(logged_error) or (proc.returncode != 0 and not final),
+         session_id=session_id,
+         exit_code=proc.returncode,
+         wall_seconds=0.0,
+         tokens_out=tokens_out,
++        error=logged_error,
+     )
+ 
+ 
+diff --git a/forge/dashboard.py b/forge/dashboard.py
+index 3e38dc5..1077c38 100644
+--- a/forge/dashboard.py
++++ b/forge/dashboard.py
+@@ -19,6 +19,26 @@ import json
+ 
+ from .config import CONFIG
+ from . import state
++from .quality import entry_has_positive_tests
++
++
++def _presentable_live(raw: dict) -> dict:
++    """Normalize old live snapshots for display.
++
++    The optimizer now discards zero-test experiments, but a dashboard may read a
++    live.json written by an older process. Filter here so refresh/restart makes
++    the UI consistent immediately.
++    """
++    out = dict(raw)
++    history = [e for e in out.get("history", []) if entry_has_positive_tests(e)]
++    out["history"] = history
++    totals = dict(out.get("totals") or {})
++    totals["experiments"] = len(history)
++    totals["adopted"] = sum(1 for e in history if e.get("adopted"))
++    totals["cost_usd"] = round(sum(float(e.get("cost_usd", 0.0) or 0.0) for e in history), 4)
++    out["totals"] = totals
++    out["best_score"] = max((float(e.get("score", 0.0) or 0.0) for e in history), default=0.0)
++    return out
+ 
+ 
+ def _build_app():
+@@ -38,7 +58,8 @@ def _build_app():
+ 
+     @app.get("/api/live")
+     def live() -> JSONResponse:
+-        return JSONResponse(state.read_live() or {"status": "idle", "status_detail": "no run yet"})
++        raw = state.read_live() or {"status": "idle", "status_detail": "no run yet"}
++        return JSONResponse(_presentable_live(raw))
+ 
+     @app.get("/api/journal")
+     def journal() -> JSONResponse:
+@@ -59,6 +80,11 @@ def _build_app():
+             out["rationale"] = rationale.read_text(encoding="utf-8")
+         return JSONResponse(out)
+ 
++    @app.post("/api/stop")
++    def stop() -> JSONResponse:
++        state.request_stop()
++        return JSONResponse({"ok": True, "lock_holder": state.lock_holder()})
++
+     return app
+ 
+ 
+@@ -100,6 +126,11 @@ _HTML = """<!doctype html>
+   h1 small { color:var(--muted); font-weight:400; font-size:13px; }
+   .badge { padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600;
+            text-transform:uppercase; letter-spacing:.5px; }
++  button { background:#21262d; color:var(--fg); border:1px solid var(--border);
++           border-radius:7px; padding:6px 10px; font:inherit; cursor:pointer; }
++  button:hover { border-color:#8b949e; }
++  button.danger { color:#ffb4ab; border-color:rgba(248,81,73,.5); }
++  button.danger:disabled { opacity:.55; cursor:default; }
+   .b-running { background:rgba(88,166,255,.15); color:var(--accent); }
+   .b-proposing { background:rgba(210,153,34,.15); color:var(--warn); }
+   .b-judging { background:rgba(210,153,34,.15); color:var(--warn); }
+@@ -161,6 +192,7 @@ _HTML = """<!doctype html>
+ <header>
+   <h1>valinor-prompt-forge <small id="cfg"></small></h1>
+   <span id="badge" class="badge b-idle">idle</span>
++  <button id="stop-btn" class="danger" type="button" onclick="stopForge()">Stop</button>
+   <span id="detail" class="detail"></span>
+   <span id="elapsed" class="detail"></span>
+ </header>
+@@ -190,7 +222,8 @@ _HTML = """<!doctype html>
+ </main>
+ <script>
+ const $ = (id) => document.getElementById(id);
+-let openRow = null;
++let openExpId = null;
++const detailCache = new Map();
+ let LAST = null;  // most recent live snapshot, for the client-side clock
+ 
+ // Ticks every second independent of server updates, so a long-running phase
+@@ -318,20 +351,29 @@ function renderRows(hist){
+       + `<td class="num">${fmt(bd.rubric,2)}</td>`
+       + `<td class="${e.adopted?'adopt':'disc'}">${e.adopted?'✓ adopted':'·'}</td>`
+       + `<td>${(e.hypothesis||"").slice(0,90)}</td>`;
+-    tr.onclick = ()=>toggleDetail(tr, e.exp_id);
++    tr.onclick = ()=>toggleDetail(e.exp_id);
+     rows.appendChild(tr);
++    if(e.exp_id === openExpId){
++      appendDetailRow(tr, e.exp_id);
++    }
+   });
+ }
+ 
+-async function toggleDetail(tr, expId){
+-  if(tr.nextSibling && tr.nextSibling.classList && tr.nextSibling.classList.contains("detailrow")){
+-    tr.nextSibling.remove(); return;
+-  }
+-  document.querySelectorAll(".detailrow").forEach(r=>r.remove());
++function appendDetailRow(tr, expId){
+   const det = document.createElement("tr");
+   det.className = "detailrow";
+-  det.innerHTML = `<td colspan="7">loading ${expId}…</td>`;
++  const cached = detailCache.get(expId);
++  det.innerHTML = `<td colspan="7">${cached || `loading ${expId}...`}</td>`;
+   tr.after(det);
++  if(!cached) loadDetail(expId, det);
++}
++
++async function toggleDetail(expId){
++  openExpId = (openExpId === expId) ? null : expId;
++  renderRows((LAST && LAST.history) || []);
++}
++
++async function loadDetail(expId, det){
+   try{
+     const r = await fetch("/api/experiment/"+expId); const d = await r.json();
+     let txt = "";
+@@ -342,8 +384,30 @@ async function toggleDetail(tr, expId){
+           + `time=${fmt(b.wall_seconds,0)}s cost=$${fmt(b.cost_usd,2)}\\n`;
+       });
+     }
+-    det.innerHTML = `<td colspan="7">${(txt||"(no detail)").replace(/</g,"&lt;")}</td>`;
+-  }catch(err){ det.innerHTML = `<td colspan="7">error: ${err}</td>`; }
++    const safe = (txt||"(no detail)").replace(/</g,"&lt;");
++    detailCache.set(expId, safe);
++    if(openExpId === expId){
++      det.innerHTML = `<td colspan="7">${safe}</td>`;
++    }
++  }catch(err){
++    const safe = `error: ${err}`.replace(/</g,"&lt;");
++    detailCache.set(expId, safe);
++    if(openExpId === expId) det.innerHTML = `<td colspan="7">${safe}</td>`;
++  }
++}
++
++async function stopForge(){
++  const btn = $("stop-btn");
++  btn.disabled = true;
++  try{
++    const r = await fetch("/api/stop", {method:"POST"});
++    if(!r.ok) throw new Error(`HTTP ${r.status}`);
++    $("detail").textContent = "stop requested; active role will be terminated";
++    await tick();
++  }catch(err){
++    $("detail").textContent = "stop request failed: " + err;
++    btn.disabled = false;
++  }
+ }
+ 
+ function renderBenchmarks(s){
+diff --git a/forge/experiment.py b/forge/experiment.py
+index 547af22..48f60cc 100644
+--- a/forge/experiment.py
++++ b/forge/experiment.py
+@@ -16,6 +16,7 @@ Public API:
+ from __future__ import annotations
+ 
+ import json
++import os
+ import shutil
+ import subprocess
+ import sys
+@@ -164,6 +165,191 @@ class ExperimentResult:
+ # Files inside a benchmark that the agent generates. Wiped on reset.
+ GENERATED_PATTERNS = ["src", "bin", ".valinor", ".opencode"]
+ 
++# Template copy exclusions. The per-run workspace is built from benchmark
++# source files only; prior agent artifacts stay out of the next experiment.
++SCRATCH_DIR_NAMES = {
++    ".git",
++    ".opencode",
++    ".valinor",
++    "bin",
++    "coverage",
++    "node_modules",
++    "src",
++}
++
++
++def _template_rel(source_dir: Path, path: Path) -> Path:
++    return path.resolve().relative_to(source_dir.resolve())
++
++
++def _is_generated_template_path(rel: Path) -> bool:
++    parts = rel.parts
++    if not parts:
++        return False
++    if any(part in SCRATCH_DIR_NAMES for part in parts):
++        return True
++    # Agents frequently create self-tests in tests/. Keep fixtures but drop
++    # generated test files so the next run starts from the benchmark contract.
++    if parts[0] == "tests" and rel.name.endswith((".test.js", ".test.ts", ".spec.js", ".spec.ts")):
++        return True
++    return False
++
++
++def _copy_file(src: Path, dst: Path) -> None:
++    dst.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copy2(src, dst)
++
++
++def _git_tracked_template_files(source_dir: Path) -> list[tuple[Path, Path]]:
++    """Return (repo-relative, source path) pairs tracked under source_dir."""
++    try:
++        rel = source_dir.resolve().relative_to(CONFIG.repo_root.resolve())
++    except ValueError:
++        return []
++    try:
++        proc = subprocess.run(
++            ["git", "ls-files", "-z", "--", str(rel).replace("\\", "/")],
++            cwd=str(CONFIG.repo_root),
++            capture_output=True,
++            text=False,
++            timeout=30,
++            shell=False,
++        )
++    except (OSError, subprocess.SubprocessError):
++        return []
++    if proc.returncode != 0 or not proc.stdout:
++        return []
++    files: list[tuple[Path, Path]] = []
++    for raw in proc.stdout.split(b"\0"):
++        if not raw:
++            continue
++        try:
++            repo_rel = Path(raw.decode("utf-8"))
++        except UnicodeDecodeError:
++            continue
++        src = CONFIG.repo_root / repo_rel
++        if src.is_file():
++            files.append((repo_rel, src))
++    return files
++
++
++def _copy_tracked_file_from_head(repo_rel: Path, dst: Path) -> bool:
++    """Copy the committed template file, ignoring dirty scratch in the worktree."""
++    git_path = str(repo_rel).replace("\\", "/")
++    try:
++        proc = subprocess.run(
++            ["git", "show", f"HEAD:{git_path}"],
++            cwd=str(CONFIG.repo_root),
++            capture_output=True,
++            text=False,
++            timeout=30,
++            shell=False,
++        )
++    except (OSError, subprocess.SubprocessError):
++        return False
++    if proc.returncode != 0:
++        return False
++    dst.parent.mkdir(parents=True, exist_ok=True)
++    dst.write_bytes(proc.stdout)
++    return True
++
++
++def _copy_template_files(source_dir: Path, work_dir: Path) -> None:
++    tracked = _git_tracked_template_files(source_dir)
++    if tracked:
++        for repo_rel, src in tracked:
++            rel = _template_rel(source_dir, src)
++            if not _is_generated_template_path(rel):
++                dst = work_dir / rel
++                if not _copy_tracked_file_from_head(repo_rel, dst):
++                    _copy_file(src, dst)
++        return
++
++    for src in source_dir.rglob("*"):
++        rel = _template_rel(source_dir, src)
++        if _is_generated_template_path(rel):
++            continue
++        if src.is_file():
++            _copy_file(src, work_dir / rel)
++
++
++def _init_workspace_git(work_dir: Path) -> None:
++    """Create a nested repo marker so agent tools stay in the run workspace."""
++    if (work_dir / ".git").exists():
++        return
++    try:
++        proc = subprocess.run(
++            ["git", "init", "-q"],
++            cwd=str(work_dir),
++            capture_output=True,
++            text=True,
++            timeout=30,
++            shell=False,
++        )
++        if proc.returncode == 0 and (work_dir / ".git").exists():
++            return
++    except (OSError, subprocess.SubprocessError):
++        pass
++    (work_dir / ".git").mkdir(exist_ok=True)
++
++
++def materialize_benchmark_workspace(source_dir: Path, bench_run_dir: Path) -> Path:
++    """Create a fresh per-run benchmark workspace and return it."""
++    work_dir = bench_run_dir / "workspace"
++    if work_dir.exists():
++        shutil.rmtree(work_dir)
++    work_dir.mkdir(parents=True, exist_ok=True)
++    _copy_template_files(source_dir, work_dir)
++    _init_workspace_git(work_dir)
++    return work_dir
++
++
++def _link_node_modules(source_dir: Path, work_dir: Path) -> bool:
++    src = source_dir / "node_modules"
++    dst = work_dir / "node_modules"
++    if dst.exists():
++        return True
++    if not src.exists():
++        return False
++    try:
++        os.symlink(src, dst, target_is_directory=True)
++        return True
++    except OSError:
++        pass
++    if os.name == "nt":
++        try:
++            proc = subprocess.run(
++                ["cmd", "/c", "mklink", "/J", str(dst), str(src)],
++                capture_output=True,
++                text=True,
++                timeout=30,
++                shell=False,
++            )
++            return proc.returncode == 0 and dst.exists()
++        except (OSError, subprocess.SubprocessError):
++            return False
++    return False
++
++
++def ensure_benchmark_dependencies(source_dir: Path, work_dir: Path) -> None:
++    """Make `npm test` usable in the isolated workspace."""
++    if not (work_dir / "package.json").exists():
++        return
++    if _link_node_modules(source_dir, work_dir):
++        return
++    try:
++        subprocess.run(
++            ["npm", "install", "--silent"],
++            cwd=str(work_dir),
++            capture_output=True,
++            text=True,
++            timeout=300,
++            shell=(sys.platform == "win32"),
++        )
++    except subprocess.SubprocessError:
++        # The later test command will produce the actionable failure.
++        return
++
+ 
+ def reset_benchmark(bench_dir: Path) -> None:
+     """Delete agent-generated artifacts but preserve brief, fixtures, deps."""
+@@ -234,13 +420,64 @@ HANDOFF_OUTPUTS: dict[Role, list[str]] = {
+     "validator": [".valinor/handoff/validation.md"],
+ }
+ 
++MAX_AUX_HANDOFF_BYTES = 256_000
++AUX_HANDOFF_FILES = ("summaries.md", "planner-status.md")
++
+ ROLE_FINAL_INSTRUCTION: dict[Role, str] = {
+-    "planner": "Your final assistant message MUST be a one-paragraph summary of what you produced and the single most important next step.",
++    "planner": (
++        "Before your final message, verify these exact files exist and are non-empty: "
++        ".valinor/handoff/spec.md, .valinor/handoff/acceptance.md, "
++        ".valinor/handoff/backlog.md. Your final assistant message MUST be a "
++        "one-paragraph summary of those three handoff artifacts and the single "
++        "most important next step. Do not write implementation source, tests, "
++        "or binaries; Generator owns those files."
++    ),
+     "generator": "Your final assistant message MUST be a one-paragraph summary of what you produced and the single most important next step.",
+     "validator": "Remember: your final message's first line must be `VERDICT: PASS` or `VERDICT: FAIL`.",
+ }
+ 
+ 
++ROLE_HARD_GUARDRAILS: dict[Role, str] = {
++    "planner": (
++        "FORGE HARD GATES: Planner owns only planning handoff. Do not write "
++        "implementation source, tests, binaries, or package files. backlog.md is "
++        "mandatory; if there is only one task, write one backlog item for that task. "
++        "Restate the user/benchmark contract precisely; do not invent implementation "
++        "patterns, algorithms, or constraints that the brief did not require. All "
++        "paths are relative to the current workspace; never search or write outside it."
++    ),
++    "generator": (
++        "FORGE HARD GATES: Implementation comes before self-tests. Keep any "
++        "agent-written tests short and focused; do not generate exhaustive or "
++        "duplicate test suites. README.md is the source of truth for the public "
++        "contract; if planner handoff conflicts with README.md, follow README.md "
++        "and record the planner gap in build-report.md. Do not substitute a "
++        "different API shape, request schema, module path, export name, or input "
++        "format than the original benchmark contract. Do not rewrite tests to "
++        "match flawed code. On Windows, use PowerShell-compatible commands and "
++        "prefer tool file reads over shell cat/read. build-report.md is mandatory "
++        "evidence every run: "
++        "if tests pass, report ON_TRACK; if tests fail or context is low, still "
++        "write build-report.md with STATUS AT_RISK or BLOCKED, exact gaps, and "
++        "the command/output you reached. Never implement a default branch that "
++        "treats an unsupported operation as a supported one; use the spec's error "
++        "semantics for recognized-but-unsupported actions. Never exit after "
++        "touching code without writing build-report.md. All paths are relative to "
++        "the current workspace; never search or write outside it."
++    ),
++    "validator": (
++        "FORGE HARD GATES: validation.md is mandatory every run. If checks fail, "
++        "write VERDICT: FAIL with exact failing criteria; do not exit silently. "
++        "README.md is the source of truth for the public contract; compare the "
++        "planner handoff, generator output, and actual code against README.md. "
++        "Static review alone is never enough for PASS when package tests can run; "
++        "run the available test command or fail with the exact reason it could "
++        "not run. "
++        "All paths are relative to the current workspace; never search or write outside it."
++    ),
++}
++
++
+ def _build_system_prompt(role: Role, prompts: ChampionPrompts) -> str:
+     """Full system-prompt body for a role: champion prompt + handoff context."""
+     inputs = "\n".join(f"- {p}" for p in HANDOFF_INPUTS[role])
+@@ -253,7 +490,8 @@ def _build_system_prompt(role: Role, prompts: ChampionPrompts) -> str:
+         f"{inputs}\n\n"
+         f"Output artifact(s) you must write:\n"
+         f"{outputs}\n\n"
+-        f"{final}"
++        f"{final}\n\n"
++        f"{ROLE_HARD_GUARDRAILS[role]}"
+     )
+ 
+ 
+@@ -262,20 +500,28 @@ def _build_system_prompt(role: Role, prompts: ChampionPrompts) -> str:
+ ROLE_USER_KICKOFF: dict[Role, str] = {
+     "planner": (
+         "Begin your role. Read .valinor/brief.json for the goal, then read the README.md "
+-        "in the project root for the benchmark spec. Produce .valinor/handoff/spec.md and "
+-        ".valinor/handoff/acceptance.md per your role instructions."
++        "in the current workspace root for the benchmark spec. Do not search outside the "
++        "current workspace. Produce all required planner outputs: "
++        ".valinor/handoff/spec.md, .valinor/handoff/acceptance.md, and "
++        ".valinor/handoff/backlog.md. Backlog is mandatory even for a single benchmark task. "
++        "Do not create or edit src/, tests/, bin/, or package files."
+     ),
+     "generator": (
+-        "Begin your role. Read .valinor/handoff/spec.md and .valinor/handoff/acceptance.md, "
+-        "then implement the plan in this repository. Write code, write tests, run them yourself "
+-        "with `npm test`, and only emit .valinor/handoff/build-report.md when all acceptance "
++        "Begin your role. Read README.md first as the original benchmark source of truth, "
++        "then read .valinor/handoff/spec.md and .valinor/handoff/acceptance.md. "
++        "Implement the exact README/module/request contract in this repository; if the "
++        "handoff conflicts with README.md, follow README.md and note the planner gap. "
++        "Write code, write focused tests from the README contract, run them yourself with "
++        "`npm test`, and only emit .valinor/handoff/build-report.md when all acceptance "
+         "criteria are met and the tests pass."
+     ),
+     "validator": (
+-        "Begin your role. Read .valinor/handoff/spec.md, .valinor/handoff/acceptance.md, "
+-        ".valinor/handoff/build-report.md, and the actual source files + tests. Independently "
+-        "run the tests yourself with `npm test`. Emit .valinor/handoff/validation.md and start "
+-        "your final assistant message with exactly `VERDICT: PASS` or `VERDICT: FAIL`."
++        "Begin your role. Read README.md first as the original benchmark source of truth, "
++        "then read .valinor/handoff/spec.md, .valinor/handoff/acceptance.md, "
++        ".valinor/handoff/build-report.md, and the actual source files + tests. "
++        "Independently run the tests yourself with `npm test`; do not PASS on static "
++        "analysis alone. Emit .valinor/handoff/validation.md and start your final "
++        "assistant message with exactly `VERDICT: PASS` or `VERDICT: FAIL`."
+     ),
+ }
+ 
+@@ -298,19 +544,204 @@ def required_outputs_missing(role: Role, bench_dir: Path) -> list[str]:
+     return missing
+ 
+ 
++def is_context_overflow(message: str | None) -> bool:
++    return bool(message and "context size has been exceeded" in message.lower())
++
++
++def _compact_repair_user_message(role: Role, missing: list[str]) -> str:
++    missing_lines = "\n".join(f"- {rel}" for rel in missing)
++    if role == "planner":
++        action = (
++            "Read only README.md and .valinor/brief.json in the current workspace. "
++            "Write compact spec.md, acceptance.md, and backlog.md if missing. Keep each "
++            "file concise and directly tied to the brief. Do not inspect generated logs, "
++            ".opencode, node_modules, or any parent directory."
++        )
++    elif role == "generator":
++        action = (
++            "Read only .valinor/handoff/spec.md, .valinor/handoff/acceptance.md, "
++            "package.json, and src/index.js if it exists. Do not open generated tests. "
++            "Write or repair only the missing implementation evidence artifact; if tests "
++            "fail, write build-report.md with STATUS AT_RISK and exact gaps."
++        )
++    else:
++        action = (
++            "Read only .valinor/handoff/spec.md, .valinor/handoff/acceptance.md, "
++            ".valinor/handoff/build-report.md, and src/index.js. Write validation.md "
++            "with VERDICT PASS/FAIL. Do not inspect generated test suites or logs."
++        )
++    return (
++        "COMPACT REPAIR AFTER CONTEXT OVERFLOW. Start fresh; do not continue the prior "
++        "long context. Missing or empty required outputs:\n"
++        f"{missing_lines}\n\n"
++        f"{action}\n"
++        "Before final response, verify every listed file exists and is non-empty."
++    )
++
++
++def recover_misdirected_handoff_outputs(role: Role, bench_dir: Path, bench_run_dir: Path) -> list[str]:
++    """Copy role outputs accidentally written beside workspace back into it."""
++    recovered: list[str] = []
++    stray_root = bench_run_dir / ".valinor" / "handoff"
++    if not stray_root.exists():
++        return recovered
++    for rel in HANDOFF_OUTPUTS[role]:
++        if not rel.startswith(".valinor/handoff/"):
++            continue
++        name = rel.split(".valinor/handoff/", 1)[1]
++        src = stray_root / name
++        dst = bench_dir / rel
++        if src.exists() and src.is_file() and src.stat().st_size > 0 and (not dst.exists() or dst.stat().st_size == 0):
++            dst.parent.mkdir(parents=True, exist_ok=True)
++            shutil.copy2(src, dst)
++            recovered.append(rel)
++    return recovered
++
++
++def cap_auxiliary_handoff_files(bench_dir: Path) -> list[str]:
++    """Keep non-contract handoff files from growing into context/disk hazards."""
++    capped: list[str] = []
++    handoff = bench_dir / ".valinor" / "handoff"
++    for name in AUX_HANDOFF_FILES:
++        path = handoff / name
++        if not path.exists() or not path.is_file():
++            continue
++        try:
++            size = path.stat().st_size
++        except OSError:
++            continue
++        if size <= MAX_AUX_HANDOFF_BYTES:
++            continue
++        keep_bytes = b""
++        try:
++            with path.open("rb") as handle:
++                handle.seek(max(size - (MAX_AUX_HANDOFF_BYTES // 2), 0))
++                keep_bytes = handle.read(MAX_AUX_HANDOFF_BYTES // 2)
++        except OSError:
++            keep_bytes = b""
++        keep = keep_bytes.decode("utf-8", errors="replace")
++        path.write_text(
++            "# Forge truncated runaway auxiliary handoff file\n\n"
++            f"Original size: {size} bytes. Keeping the latest recoverable tail only.\n\n"
++            + keep,
++            encoding="utf-8",
++        )
++        capped.append(str(path.relative_to(bench_dir)).replace("\\", "/"))
++    return capped
++
++
++PLANNER_SCOPE_LEAKS = ("src", "bin", "tests")
++
++
++def cleanup_planner_scope_leaks(bench_dir: Path) -> list[str]:
++    """Remove files the planner is not allowed to produce before generator runs."""
++    removed: list[str] = []
++    base = bench_dir.resolve()
++    for name in PLANNER_SCOPE_LEAKS:
++        target = bench_dir / name
++        if not target.exists():
++            continue
++        try:
++            target.resolve().relative_to(base)
++        except ValueError:
++            continue
++        if name == "tests" and target.is_dir():
++            removed_any = False
++            for child in sorted(target.rglob("*"), reverse=True):
++                if child.is_file() and child.name.endswith((".test.js", ".test.ts", ".spec.js", ".spec.ts")):
++                    child.unlink()
++                    removed_any = True
++            for child in sorted(target.rglob("*"), reverse=True):
++                if child.is_dir():
++                    try:
++                        child.rmdir()
++                    except OSError:
++                        pass
++            try:
++                target.rmdir()
++            except OSError:
++                pass
++            if removed_any:
++                removed.append(name)
++            continue
++        if target.is_dir():
++            shutil.rmtree(target)
++        else:
++            target.unlink()
++        removed.append(name)
++    return removed
++
++
++def _repair_user_message(role: Role, missing: list[str]) -> str:
++    missing_lines = "\n".join(f"- {rel}" for rel in missing)
++    role_guard = {
++        "planner": (
++            "Planner repair scope: write only missing planner handoff files. "
++            "Do not create or edit implementation source, tests, binaries, or package files."
++        ),
++        "generator": (
++            "Generator repair scope: write the missing build report. If src/index.js "
++            "already exists, do not open generated self-test files and do not edit tests. "
++            "Run npm test once if practical, then write .valinor/handoff/build-report.md. "
++            "If tests fail or context is low, still write the report with STATUS AT_RISK "
++            "or BLOCKED and include the exact gaps."
++        ),
++        "validator": (
++            "Validator repair scope: independently inspect code/tests, run validation, and "
++            "write the missing validation report."
++        ),
++    }[role]
++    return (
++        "REPAIR ONLY. Your previous run ended, but the harness found required output "
++        "files missing or empty:\n"
++        f"{missing_lines}\n\n"
++        f"{role_guard}\n"
++        "Read the existing handoff files, then write only the missing required artifact(s). "
++        "Before your final message, verify every listed file exists and is non-empty."
++    )
++
++
++def detect_sandbox_drift(log_path: Path, work_dir: Path) -> str | None:
++    """Detect agent tool use outside the per-run benchmark workspace."""
++    if not log_path.exists():
++        return None
++    try:
++        text = log_path.read_text(encoding="utf-8", errors="replace")
++    except OSError:
++        return None
++    work = str(work_dir.resolve()).lower().replace("/", "\\")
++    forbidden = [
++        CONFIG.repo_root / ".valinor",
++        CONFIG.benchmarks_dir,
++    ]
++    tokens = [(path, str(path.resolve()).lower().replace("/", "\\")) for path in forbidden]
++    for raw_line in text.splitlines():
++        line = raw_line.lower().replace("/", "\\")
++        if "node_modules" in line:
++            continue
++        for path, token in tokens:
++            if token in line and not token.startswith(work):
++                return f"agent accessed outside benchmark workspace: {path}"
++    return None
++
++
+ def run_role(
+     role: Role,
+     prompts: ChampionPrompts,
+     bench_dir: Path,
+     exp_run_dir: Path,
+     on_progress: Callable[[int], None] | None = None,
++    attempt_label: str | None = None,
++    user_message: str | None = None,
+ ) -> RoleResult:
+     """Run one role against the benchmark via the authed CLI. Returns outputs."""
+     system_prompt = _build_system_prompt(role, prompts)
+-    user_message = ROLE_USER_KICKOFF[role]
+-    log_path = exp_run_dir / f"stdout.{role}.log"
+-    sp_file = exp_run_dir / f"system.{role}.txt"
++    user_message = user_message or ROLE_USER_KICKOFF[role]
++    suffix = f".{attempt_label}" if attempt_label else ""
++    log_path = exp_run_dir / f"stdout.{role}{suffix}.log"
++    sp_file = exp_run_dir / f"system.{role}{suffix}.txt"
+ 
++    cap_auxiliary_handoff_files(bench_dir)
+     run = run_agent(
+         system_prompt=system_prompt,
+         user_message=user_message,
+@@ -320,10 +751,13 @@ def run_role(
+         label=role,
+         on_progress=on_progress,
+     )
++    cap_auxiliary_handoff_files(bench_dir)
+ 
+     artifact_path = bench_dir / ROLE_PRIMARY_ARTIFACT[role]
+     artifact = artifact_path.read_text(encoding="utf-8") if artifact_path.exists() else None
+ 
++    drift = detect_sandbox_drift(log_path, bench_dir)
++
+     return RoleResult(
+         role=role,
+         session_id=run.session_id,
+@@ -334,7 +768,7 @@ def run_role(
+         cost_usd=run.cost_usd,
+         num_turns=run.num_turns,
+         tokens_out=run.tokens_out,
+-        error=run.error,
++        error=run.error or drift,
+     )
+ 
+ 
+@@ -360,41 +794,47 @@ def parse_verdict(final_message: str) -> str:
+ GOLDEN_MARKER = "__forge_golden__"
+ 
+ 
+-def _inject_golden_tests(bench_dir: Path) -> bool:
++def _inject_golden_tests(bench_dir: Path, benchmark_name: str | None = None) -> list[Path]:
+     """If a held-out golden suite exists at golden/<benchmark>/, copy it into the
+     benchmark's tests/ dir (marked, so the runner targets only it) so scoring
+     measures true correctness against edge cases the agent never saw. Returns
+-    True if injected.
++    the copied files.
+ 
+     The golden suite lives OUTSIDE the agent's working dir and is copied in only
+     here, after the agents have finished — so they cannot read or overfit to it.
+     Kept in tests/ (not a subdir) so its `../src/index.js` import still resolves.
+     The next experiment's reset_benchmark() wipes the benchmark scratch."""
+-    golden_dir = CONFIG.repo_root / "golden" / bench_dir.name
++    golden_dir = CONFIG.repo_root / "golden" / (benchmark_name or bench_dir.name)
+     golden_files = sorted(golden_dir.glob("*.test.js")) if golden_dir.exists() else []
+     if not golden_files:
+-        return False
++        return []
+     tests_dir = bench_dir / "tests"
+     tests_dir.mkdir(exist_ok=True)
+     for f in tests_dir.glob(f"{GOLDEN_MARKER}*"):
+         f.unlink()
++    copied: list[Path] = []
+     for gf in golden_files:
+-        shutil.copy2(gf, tests_dir / f"{GOLDEN_MARKER}{gf.name}")
+-    return True
++        dst = tests_dir / f"{GOLDEN_MARKER}{gf.name}"
++        shutil.copy2(gf, dst)
++        copied.append(dst)
++    return copied
+ 
+ 
+-def run_tests(bench_dir: Path) -> TestResult:
++def run_tests(bench_dir: Path, benchmark_name: str | None = None) -> TestResult:
+     """Run vitest in the benchmark dir and parse the JSON summary.
+ 
+     If a held-out golden suite exists, it is injected and the runner is FILTERED
+     to only the golden files — so the score reflects true correctness against
+     our edge cases, never the generator's (gameable) self-tests, wherever it put
+     them."""
+-    held_out = _inject_golden_tests(bench_dir)
+-    filter_args = [GOLDEN_MARKER] if held_out else []
++    held_out = _inject_golden_tests(bench_dir, benchmark_name)
++    if held_out:
++        cmd = ["npx", "vitest", "run", *[str(p.relative_to(bench_dir)) for p in held_out], "--reporter=json"]
++    else:
++        cmd = ["npm", "test", "--silent", "--", "--reporter=json"]
+     try:
+         proc = subprocess.run(
+-            ["npm", "test", "--silent", "--", *filter_args, "--reporter=json"],
++            cmd,
+             cwd=str(bench_dir),
+             capture_output=True,
+             text=True,
+@@ -441,6 +881,7 @@ def run_tests(bench_dir: Path) -> TestResult:
+ 
+ def _snapshot_final_state(bench_dir: Path, bench_run_dir: Path) -> None:
+     """Capture generated state before golden tests are injected."""
++    cap_auxiliary_handoff_files(bench_dir)
+     snapshot_dir = bench_run_dir / "final-state"
+     snapshot_dir.mkdir(exist_ok=True)
+     for name in [".valinor", "src", "bin", "tests"]:
+@@ -471,29 +912,182 @@ def _blocked_result(
+     )
+ 
+ 
++def _failed_result_with_tests(
++    benchmark: str,
++    bench_dir: Path,
++    bench_run_dir: Path,
++    roles: list[RoleResult],
++    cycles: int,
++    reason: str,
++) -> BenchmarkResult:
++    _snapshot_final_state(bench_dir, bench_run_dir)
++    test = run_tests(bench_dir, benchmark)
++    if test.total == 0:
++        test.raw_stderr = reason
++        test.failed_names = [reason]
++    return BenchmarkResult(
++        benchmark=benchmark,
++        cycles=cycles,
++        verdict="fail",
++        test=test,
++        roles=roles,
++    )
++
++
+ # ─────────────────────────────────────────────────────────────────────────────
+ # Public: one experiment
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+ 
++def _run_package_tests_raw(bench_dir: Path, timeout_s: int = 120) -> tuple[int | None, str, str]:
++    """Run the benchmark's own visible test script without injecting golden tests."""
++    if not (bench_dir / "package.json").exists():
++        return 0, "", "No package.json; package test was not applicable."
++    try:
++        proc = subprocess.run(
++            ["npm", "test"],
++            cwd=str(bench_dir),
++            capture_output=True,
++            text=True,
++            encoding="utf-8",
++            errors="replace",
++            timeout=timeout_s,
++            shell=(sys.platform == "win32"),
++        )
++    except subprocess.TimeoutExpired as exc:
++        out = exc.stdout if isinstance(exc.stdout, str) else ""
++        err = exc.stderr if isinstance(exc.stderr, str) else ""
++        return None, out, (err + f"\nPackage test timeout after {timeout_s}s").strip()
++    except subprocess.SubprocessError as exc:
++        return None, "", f"Package test failed to start: {exc}"
++    return proc.returncode, proc.stdout or "", proc.stderr or ""
++
++
++def recover_missing_generator_report(bench_dir: Path) -> RoleResult | None:
++    """Write explicit Generator failure/evidence when build-report.md is omitted."""
++    report_path = bench_dir / ".valinor" / "handoff" / "build-report.md"
++    if report_path.exists() and report_path.stat().st_size > 0:
++        return None
++    src_dir = bench_dir / "src"
++    if not src_dir.exists():
++        return None
++
++    started = time.time()
++    code_files = sorted(str(p.relative_to(bench_dir)).replace("\\", "/") for p in src_dir.rglob("*") if p.is_file())
++    rc, stdout, stderr = _run_package_tests_raw(bench_dir, timeout_s=120)
++    status = "ON_TRACK" if rc == 0 else "AT_RISK"
++    headline = (
++        "Implementation evidence was recovered and visible tests pass."
++        if rc == 0 else
++        "Implementation evidence was recovered, but visible tests still need attention."
++    )
++    output = (stdout + ("\n" + stderr if stderr else "")).strip()
++    if len(output) > 6000:
++        output = output[:6000] + "\n... [truncated by forge recovery]"
++    report = (
++        "<!-- EXEC-SUMMARY\n"
++        "OBJECTIVE: Complete the benchmark implementation handoff\n"
++        f"STATUS: {status}\n"
++        f"HEADLINE: {headline}\n"
++        "IMPLEMENTED: Generator wrote implementation files but exited without its required evidence report.\n"
++        "VALIDATED: Forge recovery ran the visible package test command and preserved the result for Validator.\n"
++        "TRADEOFFS: This report is a recovery artifact, not a Validator verdict.\n"
++        "OBS: Generator must still be judged by Validator and held-out scoring.\n"
++        "BLOCKERS: none\n"
++        "EXEC-SUMMARY -->\n\n"
++        "# Build Report - Forge Recovery\n\n"
++        "Generator-owned build-report.md was missing after Generator and one repair attempt. "
++        "Forge wrote this recovery report so the handoff can continue with explicit evidence "
++        "instead of silently blocking.\n\n"
++        "## Implementation Files Detected\n\n"
++        + "\n".join(f"- `{name}`" for name in code_files)
++        + "\n\n## Visible Package Test\n\n"
++        "- Command: `npm test`\n"
++        f"- Exit code: `{rc if rc is not None else 'timeout/error'}`\n\n"
++        "```text\n"
++        f"{output or '(no output)'}\n"
++        "```\n"
++    )
++    report_path.parent.mkdir(parents=True, exist_ok=True)
++    report_path.write_text(report, encoding="utf-8")
++    return RoleResult(
++        role="generator",
++        session_id=None,
++        exit_code=0 if rc == 0 else 1,
++        wall_seconds=time.time() - started,
++        final_message="Forge recovery wrote missing generator build-report.md from existing implementation evidence.",
++        artifact=report,
++    )
++
++
++def recover_missing_validator_report(bench_dir: Path, reason: str | None = None) -> RoleResult | None:
++    """Write explicit Validator failure/evidence when validation.md is omitted."""
++    report_path = bench_dir / ".valinor" / "handoff" / "validation.md"
++    if report_path.exists() and report_path.stat().st_size > 0:
++        return None
++    if not (bench_dir / ".valinor" / "handoff" / "build-report.md").exists():
++        return None
++
++    started = time.time()
++    rc, stdout, stderr = _run_package_tests_raw(bench_dir, timeout_s=120)
++    output = (stdout + ("\n" + stderr if stderr else "")).strip()
++    if len(output) > 6000:
++        output = output[:6000] + "\n... [truncated by forge recovery]"
++    verdict = "PASS" if rc == 0 and not reason else "FAIL"
++    report = (
++        f"VERDICT: {verdict}\n\n"
++        "<!-- EXEC-SUMMARY\n"
++        "OBJECTIVE: Validate the implementation handoff\n"
++        f"STATUS: {'ON_TRACK' if verdict == 'PASS' else 'AT_RISK'}\n"
++        f"HEADLINE: Validator evidence was recovered after validator omitted validation.md.\n"
++        "IMPLEMENTED: No implementation changes were made by Validator recovery.\n"
++        "VALIDATED: Forge recovery ran the visible package test command and recorded the outcome.\n"
++        "TRADEOFFS: This report is a recovery artifact, not an independent human-quality review.\n"
++        f"OBS: Original validator issue: {reason or 'missing validation.md'}.\n"
++        "BLOCKERS: none\n"
++        "EXEC-SUMMARY -->\n\n"
++        "# Validation Report - Forge Recovery\n\n"
++        "Validator-owned validation.md was missing after Validator. Forge wrote this recovery "
++        "report so the run has explicit final evidence instead of a silent missing artifact.\n\n"
++        "## Visible Package Test\n\n"
++        "- Command: `npm test`\n"
++        f"- Exit code: `{rc if rc is not None else 'timeout/error'}`\n\n"
++        "```text\n"
++        f"{output or '(no output)'}\n"
++        "```\n"
++    )
++    report_path.parent.mkdir(parents=True, exist_ok=True)
++    report_path.write_text(report, encoding="utf-8")
++    return RoleResult(
++        role="validator",
++        session_id=None,
++        exit_code=0 if verdict == "PASS" else 1,
++        wall_seconds=time.time() - started,
++        final_message=f"VERDICT: {verdict}\nForge recovery wrote missing validator validation.md.",
++        artifact=report,
++    )
++
++
+ def run_one_benchmark(
+     benchmark: str,
+     prompts: ChampionPrompts,
+     exp_dir: Path,
+     on_role: "callable | None" = None,
+ ) -> BenchmarkResult:
+-    bench_dir = CONFIG.benchmarks_dir / benchmark
+-    if not bench_dir.exists():
+-        raise FileNotFoundError(f"benchmark not found: {bench_dir}")
++    source_dir = CONFIG.benchmarks_dir / benchmark
++    if not source_dir.exists():
++        raise FileNotFoundError(f"benchmark not found: {source_dir}")
++    bench_run_dir = exp_dir / benchmark
++    bench_run_dir.mkdir(parents=True, exist_ok=True)
++
++    bench_dir = materialize_benchmark_workspace(source_dir, bench_run_dir)
++    ensure_benchmark_dependencies(source_dir, bench_dir)
+ 
+     readme_path = bench_dir / "README.md"
+     readme = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+ 
+-    bench_run_dir = exp_dir / benchmark
+-    bench_run_dir.mkdir(parents=True, exist_ok=True)
+-
+-    reset_benchmark(bench_dir)
+     setup_valinor_dir(bench_dir, readme)
++    cap_auxiliary_handoff_files(bench_dir)
+ 
+     roles: list[RoleResult] = []
+     verdict = "unknown"
+@@ -503,6 +1097,30 @@ def run_one_benchmark(
+         if on_role:
+             on_role(benchmark, role, phase, result)
+ 
++    def _repair_missing_outputs(role: Role, missing: list[str]) -> RoleResult:
++        _emit(role, "repair_start")
++        repair_res = run_role(
++            role, prompts, bench_dir, bench_run_dir,
++            on_progress=lambda tokens: _emit(role, "progress", tokens),
++            attempt_label="repair1",
++            user_message=_repair_user_message(role, missing),
++        )
++        roles.append(repair_res)
++        _emit(role, "repair_done", repair_res)
++        return repair_res
++
++    def _compact_repair_outputs(role: Role, missing: list[str]) -> RoleResult:
++        _emit(role, "compact_repair_start")
++        repair_res = run_role(
++            role, prompts, bench_dir, bench_run_dir,
++            on_progress=lambda tokens: _emit(role, "progress", tokens),
++            attempt_label="compact1",
++            user_message=_compact_repair_user_message(role, missing),
++        )
++        roles.append(repair_res)
++        _emit(role, "compact_repair_done", repair_res)
++        return repair_res
++
+     # planner once, then generator+validator up to max_rework_rounds times.
+     _emit("planner", "start")
+     planner_res = run_role(
+@@ -511,7 +1129,25 @@ def run_one_benchmark(
+     )
+     roles.append(planner_res)
+     _emit("planner", "done", planner_res)
++    recover_misdirected_handoff_outputs("planner", bench_dir, bench_run_dir)
++    cap_auxiliary_handoff_files(bench_dir)
+     missing = required_outputs_missing("planner", bench_dir)
++    if planner_res.error and is_context_overflow(planner_res.error):
++        if missing:
++            compact_res = _compact_repair_outputs("planner", missing)
++            recover_misdirected_handoff_outputs("planner", bench_dir, bench_run_dir)
++            missing = required_outputs_missing("planner", bench_dir)
++            if not missing and not compact_res.error:
++                planner_res.error = None
++        else:
++            planner_res.error = None
++    if not planner_res.error and missing:
++        repair_res = _repair_missing_outputs("planner", missing)
++        recover_misdirected_handoff_outputs("planner", bench_dir, bench_run_dir)
++        missing = required_outputs_missing("planner", bench_dir)
++        if repair_res.error:
++            return _blocked_result(benchmark, bench_dir, bench_run_dir, roles, cycles, repair_res.error)
++    cleanup_planner_scope_leaks(bench_dir)
+     if planner_res.error or missing:
+         reason = planner_res.error or f"planner missing required output(s): {', '.join(missing)}"
+         return _blocked_result(benchmark, bench_dir, bench_run_dir, roles, cycles, reason)
+@@ -525,8 +1161,46 @@ def run_one_benchmark(
+         )
+         roles.append(gen_res)
+         _emit("generator", "done", gen_res)
++        recover_misdirected_handoff_outputs("generator", bench_dir, bench_run_dir)
++        cap_auxiliary_handoff_files(bench_dir)
+         missing = required_outputs_missing("generator", bench_dir)
+-        if gen_res.error or missing:
++        generator_had_error = bool(gen_res.error)
++        if gen_res.error and is_context_overflow(gen_res.error):
++            if missing:
++                compact_res = _compact_repair_outputs("generator", missing)
++                recover_misdirected_handoff_outputs("generator", bench_dir, bench_run_dir)
++                missing = required_outputs_missing("generator", bench_dir)
++                if not missing and not compact_res.error:
++                    gen_res.error = None
++                    generator_had_error = False
++            else:
++                gen_res.error = None
++                generator_had_error = False
++        if not gen_res.error and missing:
++            repair_res = _repair_missing_outputs("generator", missing)
++            recover_misdirected_handoff_outputs("generator", bench_dir, bench_run_dir)
++            missing = required_outputs_missing("generator", bench_dir)
++            if repair_res.error:
++                generator_had_error = True
++        if missing:
++            recovery_res = recover_missing_generator_report(bench_dir)
++            if recovery_res is not None:
++                roles.append(recovery_res)
++                _emit("generator", "recovered", recovery_res)
++                if recovery_res.exit_code != 0:
++                    return _failed_result_with_tests(
++                        benchmark,
++                        bench_dir,
++                        bench_run_dir,
++                        roles,
++                        cycles,
++                        recovery_res.error or recovery_res.final_message or "generator recovery failed",
++                    )
++                missing = required_outputs_missing("generator", bench_dir)
++        if generator_had_error and not (bench_dir / ".valinor" / "handoff" / "build-report.md").exists():
++            reason = gen_res.error or "generator failed before writing build-report.md"
++            return _blocked_result(benchmark, bench_dir, bench_run_dir, roles, cycles, reason)
++        if missing:
+             reason = gen_res.error or f"generator missing required output(s): {', '.join(missing)}"
+             return _blocked_result(benchmark, bench_dir, bench_run_dir, roles, cycles, reason)
+ 
+@@ -538,10 +1212,38 @@ def run_one_benchmark(
+         roles.append(val_res)
+         verdict = parse_verdict(val_res.final_message)
+         _emit("validator", "done", val_res)
++        recover_misdirected_handoff_outputs("validator", bench_dir, bench_run_dir)
++        cap_auxiliary_handoff_files(bench_dir)
+         missing = required_outputs_missing("validator", bench_dir)
++        if val_res.error and is_context_overflow(val_res.error):
++            if missing:
++                compact_res = _compact_repair_outputs("validator", missing)
++                recover_misdirected_handoff_outputs("validator", bench_dir, bench_run_dir)
++                verdict = parse_verdict(compact_res.final_message)
++                missing = required_outputs_missing("validator", bench_dir)
++                if not missing and not compact_res.error:
++                    val_res.error = None
++            else:
++                val_res.error = None
++        if not val_res.error and missing:
++            repair_res = _repair_missing_outputs("validator", missing)
++            verdict = parse_verdict(repair_res.final_message)
++            recover_misdirected_handoff_outputs("validator", bench_dir, bench_run_dir)
++            missing = required_outputs_missing("validator", bench_dir)
++            if repair_res.error:
++                verdict = "unknown"
+         if val_res.error or missing:
++            recovery_res = recover_missing_validator_report(bench_dir, val_res.error)
++            if recovery_res is not None:
++                roles.append(recovery_res)
++                _emit("validator", "recovered", recovery_res)
++                verdict = parse_verdict(recovery_res.final_message)
++                missing = required_outputs_missing("validator", bench_dir)
++        if missing:
+             verdict = "unknown"
+             break
++        if val_res.error and verdict == "unknown":
++            break
+         if verdict == "pass":
+             break
+ 
+@@ -550,7 +1252,9 @@ def run_one_benchmark(
+     _snapshot_final_state(bench_dir, bench_run_dir)
+ 
+     # Score on the held-out golden tests (true correctness, not self-consistency).
+-    test = run_tests(bench_dir)
++    test = run_tests(bench_dir, benchmark)
++    if test.total > 0 and test.failed > 0:
++        verdict = "fail"
+ 
+     return BenchmarkResult(
+         benchmark=benchmark,
+diff --git a/forge/orchestrator.py b/forge/orchestrator.py
+index f40d3d6..f514978 100644
+--- a/forge/orchestrator.py
++++ b/forge/orchestrator.py
+@@ -31,6 +31,7 @@ from .judge import score_experiment, RubricResult
+ from .scorer import Score, compute_score, beats
+ from .proposer import propose, build_context_md
+ from .progress import ProgressTracker
++from .quality import experiment_has_positive_tests, score_has_positive_tests, usable_journal_entries
+ 
+ 
+ # ─────────────────────────────────────────────────────────────────────────────
+@@ -113,7 +114,8 @@ class Live:
+         state.write_live(self.d)
+ 
+     def hydrate_from_journal(self, journal: list[dict]) -> None:
+-        adopted = [e for e in journal if e.get("adopted")]
++        usable = usable_journal_entries(journal)
++        adopted = [e for e in usable if e.get("adopted")]
+         if adopted:
+             last = adopted[-1]
+             self.d["champion"] = {
+@@ -121,14 +123,14 @@ class Live:
+                 "score": last.get("score", 0.0),
+                 "breakdown": last.get("breakdown", {}),
+             }
+-        self.d["totals"]["experiments"] = len(journal)
++        self.d["totals"]["experiments"] = len(usable)
+         self.d["totals"]["adopted"] = len(adopted)
+-        self.d["totals"]["cost_usd"] = round(sum(e.get("cost_usd", 0.0) for e in journal), 4)
+-        self.d["best_score"] = max((e.get("score", 0.0) for e in journal), default=0.0)
++        self.d["totals"]["cost_usd"] = round(sum(e.get("cost_usd", 0.0) for e in usable), 4)
++        self.d["best_score"] = max((e.get("score", 0.0) for e in usable), default=0.0)
+         self.d["history"] = [
+             {k: e.get(k) for k in ("exp_id", "score", "adopted", "hypothesis",
+                                    "breakdown", "cost_usd", "finished_at")}
+-            for e in journal[-200:]
++            for e in usable[-200:]
+         ]
+         state.write_live(self.d)
+ 
+@@ -175,7 +177,10 @@ def _run_and_score(prompts: ChampionPrompts, exp_id: str, live: Live,
+             live.d["progress"] = tracker.to_dict()
+         live.status("judging", f"{exp_id}: judging {bench}")
+ 
+-    rubric_mean, rubrics = score_experiment(exp, on_judge=on_judge)
++    if experiment_has_positive_tests(exp):
++        rubric_mean, rubrics = score_experiment(exp, on_judge=on_judge)
++    else:
++        rubric_mean, rubrics = 0.0, []
+     score = compute_score(exp, rubric_mean)
+     live.tracker = None
+     live.d["current_exp"] = None
+@@ -219,6 +224,7 @@ def _record(live: Live, entry: dict, journal: list[dict]) -> None:
+ 
+ 
+ def _write_progress(journal: list[dict], live: Live) -> None:
++    usable = usable_journal_entries(journal)
+     champ = live.d.get("champion") or {}
+     lines = [
+         "# forge progress",
+@@ -240,7 +246,7 @@ def _write_progress(journal: list[dict], live: Live) -> None:
+         "| exp | score | tests | speed | rubric | time/bench | adopted | hypothesis |",
+         "| --- | ----- | ----- | ----- | ------ | ---------- | ------- | ---------- |",
+     ]
+-    for e in reversed(journal[-50:]):
++    for e in reversed(usable[-50:]):
+         bd = e.get("breakdown", {})
+         hyp = (e.get("hypothesis") or "").replace("\n", " ").replace("|", "/")[:80]
+         speed = bd.get("speed", bd.get("cycles", 0))
+@@ -289,6 +295,7 @@ def _rotate_entry(exp_id: str, bench: str, score: Score, adopted: bool,
+ def _update_rotate_live(live: Live, journal: list[dict], champion_scores: dict[str, Score]) -> None:
+     live.hydrate_from_journal(journal)
+     agg = _agg(champion_scores)
++    usable = usable_journal_entries(journal)
+     if champion_scores:
+         n = len(champion_scores)
+         live.d["champion"] = {
+@@ -304,7 +311,7 @@ def _update_rotate_live(live: Live, journal: list[dict], champion_scores: dict[s
+             "speed": round(s.speed, 3), "rubric": round(s.rubric, 3)}
+         for b, s in champion_scores.items()
+     }
+-    live.d["best_score"] = round(max([agg] + [e.get("aggregate", 0.0) for e in journal], default=agg), 4)
++    live.d["best_score"] = round(max([agg] + [e.get("aggregate", 0.0) for e in usable], default=agg), 4)
+     state.write_live(live.d)
+ 
+ 
+@@ -317,7 +324,7 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
+     done = 0
+ 
+     # Resume per-benchmark champions from the journal (last adopted per benchmark).
+-    for e in journal:
++    for e in usable_journal_entries(journal):
+         b = e.get("benchmark")
+         if b in benchmarks and e.get("adopted"):
+             champion_scores[b] = _score_from_entry(e)
+@@ -340,13 +347,19 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
+             return 1
+         rub_by = {r.benchmark: r for r in rubrics}
+         cost = exp.total_cost_usd + sum(r.cost_usd for r in rubrics)
++        baseline_scores: dict[str, Score] = {}
+         for b in exp.benchmarks:
+             sc = _single_score(b, rub_by.get(b.benchmark))
+-            champion_scores[b.benchmark] = sc
+-            bench_ctx[b.benchmark] = (exp, [rub_by.get(b.benchmark)], sc)
++            baseline_scores[b.benchmark] = sc
++            if score_has_positive_tests(sc):
++                champion_scores[b.benchmark] = sc
++                bench_ctx[b.benchmark] = (exp, [rub_by.get(b.benchmark)], sc)
+         for b in exp.benchmarks:
+-            entry = _rotate_entry(exp_id, b.benchmark, champion_scores[b.benchmark], True,
++            sc = baseline_scores[b.benchmark]
++            entry = _rotate_entry(exp_id, b.benchmark, sc, score_has_positive_tests(sc),
+                                   "baseline (seed prompts)", _agg(champion_scores), "baseline", cost / n)
++            if not score_has_positive_tests(sc):
++                entry["discarded_reason"] = "zero test grade; omitted from proposer context and champion history"
+             state.append_journal(entry)
+             journal.append(entry)
+         done += 1
+@@ -379,8 +392,9 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
+         live.status("proposing", f"{exp_id}: proposing for {bench}")
+         ctx = bench_ctx.get(bench)
+         context_md = build_context_md(ctx[0], ctx[1], ctx[2]) if ctx else "# No prior context.\n"
++        proposer_journal = usable_journal_entries(state.read_journal(limit=36))[-12:]
+         proposal = propose(candidate_dir=run_dir / "candidate", champion=champion_prompts,
+-                           journal_entries=state.read_journal(limit=12), context_md=context_md, log_dir=run_dir)
++                           journal_entries=proposer_journal, context_md=context_md, log_dir=run_dir)
+         tracker.done("propose", tokens=proposal.tokens_out)
+         live.d["progress"] = tracker.to_dict()
+         if proposal.error:
+@@ -395,14 +409,18 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
+             live.status("error", f"{exp_id}: experiment failed"); time.sleep(5); continue
+ 
+         champ = champion_scores.get(bench)
+-        won = beats(score, champ)
++        valid_score = score_has_positive_tests(score)
++        won = valid_score and beats(score, champ)
+         if won:
+             _adopt(proposal.prompts)
+             champion_prompts = proposal.prompts
+             champion_scores[bench] = score
+-        bench_ctx[bench] = (exp, rubrics, score)
++        if valid_score:
++            bench_ctx[bench] = (exp, rubrics, score)
+         cost = exp.total_cost_usd + proposal.cost_usd + sum(r.cost_usd for r in rubrics)
+         entry = _rotate_entry(exp_id, bench, score, won, proposal.hypothesis, _agg(champion_scores), "rotate", cost)
++        if not valid_score:
++            entry["discarded_reason"] = "zero test grade; omitted from proposer context and champion history"
+         state.append_journal(entry); journal.append(entry)
+         done += 1
+         _update_rotate_live(live, journal, champion_scores)
+@@ -421,8 +439,9 @@ def _rotate_loop(live: Live, journal: list[dict], champion_prompts: ChampionProm
+                 rub_by = {r.benchmark: r for r in crubrics}
+                 for b in cexp.benchmarks:
+                     sc = _single_score(b, rub_by.get(b.benchmark))
+-                    champion_scores[b.benchmark] = sc
+-                    bench_ctx[b.benchmark] = (cexp, [rub_by.get(b.benchmark)], sc)
++                    if score_has_positive_tests(sc):
++                        champion_scores[b.benchmark] = sc
++                        bench_ctx[b.benchmark] = (cexp, [rub_by.get(b.benchmark)], sc)
+                 cost = cexp.total_cost_usd + sum(r.cost_usd for r in crubrics)
+                 entry = _rotate_entry(ckpt_id, "ALL", Score(_agg(champion_scores), 0, 0, 0, 0.0, 0),
+                                       False, "global checkpoint (champion re-evaluated on all)",
+@@ -491,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
+     threading.Thread(target=_heartbeat, daemon=True).start()
+ 
+     champion_prompts = ChampionPrompts.load(CONFIG.prompts_champion_dir)
+-    adopted_entries = [e for e in journal if e.get("adopted")]
++    adopted_entries = [e for e in usable_journal_entries(journal) if e.get("adopted")]
+     champion_score: Score | None = _score_from_entry(adopted_entries[-1]) if adopted_entries else None
+     best_total = live.d["best_score"]
+     plateau = 0
+@@ -533,11 +552,15 @@ def main(argv: list[str] | None = None) -> int:
+             live.status("error", f"baseline failed: {e}")
+             return 1
+         judge_cost = sum(r.cost_usd for r in rubrics)
+-        champion_score = score
+-        best_total = score.total
+-        entry = _journal_entry(exp, score, adopted=True,
++        baseline_adopted = score_has_positive_tests(score)
++        if baseline_adopted:
++            champion_score = score
++            best_total = score.total
++        entry = _journal_entry(exp, score, adopted=baseline_adopted,
+                                hypothesis="baseline (seed prompts, unchanged)",
+                                changes_summary="—", proposer_cost=0.0, judge_cost=judge_cost)
++        if not baseline_adopted:
++            entry["discarded_reason"] = "zero test grade; omitted from proposer context and champion history"
+         _record(live, entry, journal)
+         done += 1
+         print(f"[forge] baseline score={score.total:.3f} "
+@@ -574,10 +597,11 @@ def main(argv: list[str] | None = None) -> int:
+         live.status("proposing", f"{exp_id}: proposing mutation")
+         context_md = (build_context_md(latest_exp, latest_rubrics, latest_score)
+                       if latest_exp is not None else "# No prior experiment context.\n")
++        proposer_journal = usable_journal_entries(state.read_journal(limit=36))[-12:]
+         proposal = propose(
+             candidate_dir=run_dir / "candidate",
+             champion=champion_prompts,
+-            journal_entries=state.read_journal(limit=12),
++            journal_entries=proposer_journal,
+             context_md=context_md,
+             log_dir=run_dir,
+         )
+@@ -600,10 +624,12 @@ def main(argv: list[str] | None = None) -> int:
+             continue
+ 
+         judge_cost = sum(r.cost_usd for r in rubrics)
+-        latest_exp, latest_rubrics, latest_score = exp, rubrics, score
++        valid_score = score_has_positive_tests(score)
++        if valid_score:
++            latest_exp, latest_rubrics, latest_score = exp, rubrics, score
+ 
+         # 4. ratchet
+-        won = beats(score, champion_score)
++        won = valid_score and beats(score, champion_score)
+         if won:
+             _adopt(proposal.prompts)
+             champion_prompts = proposal.prompts
+@@ -618,6 +644,8 @@ def main(argv: list[str] | None = None) -> int:
+         entry = _journal_entry(exp, score, adopted=won, hypothesis=proposal.hypothesis,
+                                changes_summary=proposal.hypothesis[:120],
+                                proposer_cost=proposal.cost_usd, judge_cost=judge_cost)
++        if not valid_score:
++            entry["discarded_reason"] = "zero test grade; omitted from proposer context and champion history"
+         _record(live, entry, journal)
+         done += 1
+ 
+diff --git a/forge/scorer.py b/forge/scorer.py
+index d353bbc..280a26d 100644
+--- a/forge/scorer.py
++++ b/forge/scorer.py
+@@ -32,6 +32,7 @@ from dataclasses import dataclass
+ 
+ from .config import CONFIG
+ from .experiment import ExperimentResult
++from .quality import experiment_has_positive_tests
+ 
+ 
+ @dataclass(frozen=True)
+@@ -62,9 +63,18 @@ def compute_score(experiment: ExperimentResult, rubric_score: float) -> Score:
+     `rubric_score` must already be normalized to [0, 1]. judge.py is
+     responsible for that normalization.
+     """
+-    rubric_score = max(0.0, min(1.0, rubric_score))
+     test_rate = experiment.aggregate_pass_rate
+     mean_seconds = experiment.mean_benchmark_wall_seconds
++    if not experiment_has_positive_tests(experiment):
++        return Score(
++            total=0.0,
++            tests=0.0,
++            speed=0.0,
++            rubric=0.0,
++            raw_wall_seconds=mean_seconds,
++            raw_total_cycles=experiment.total_cycles,
++        )
++    rubric_score = max(0.0, min(1.0, rubric_score))
+     spd = time_efficiency(mean_seconds)
+     w = CONFIG.weights
+     total = w.tests * test_rate + w.speed * spd + w.rubric * rubric_score
+diff --git a/prompts/champion/generator.md b/prompts/champion/generator.md
+index 6778f6a..8f74668 100644
+--- a/prompts/champion/generator.md
++++ b/prompts/champion/generator.md
+@@ -1,10 +1,14 @@
+ You are the GENERATOR in a long-running autonomous coding harness.
++
++OPERATING MODE (read first): Match effort to the task. If the `.valinor/` harness files do NOT exist, treat this as a single self-contained coding task — read the spec and success criteria as given, then go straight to a complete implementation plus automated tests that you run yourself. Skip status/journal/exec-summary ceremony and spend wall-clock time only on code and tests that prove a criterion. Implementing fully and passing tests is always the priority.
++
+ Read the plan at .valinor/handoff/spec.md and the clearing criteria at .valinor/handoff/acceptance.md. If .valinor/handoff/validation.md reports gaps from a previous cycle, those gaps are your top priority.
+ Treat .valinor/handoff/acceptance.md and every `Success criteria` subsection in .valinor/handoff/spec.md as the planner-authored success criteria / validation criteria contract. Do not rewrite, weaken, or invent different criteria.
+ build-report.md is implementation evidence, not final validation. Only Validator-authored validation.md can render the final validation verdict.
+ 
+ Implement the plan FULLY. Every feature and every description in the spec must be completely implemented — no stubs, no TODOs, no partial work, no 'good enough'.
+ Write or update automated tests covering every planner-authored success criterion, and run the full test suite yourself.
++Your tests must cover COMBINED/composite inputs and interaction behaviour (precedence, associativity, evaluation order, ordering, boundary combinations) — not just isolated single-operation happy paths. The most common silent defect is a composite case that each feature passes in isolation but fails when combined; implement the interaction semantics from the spec exactly and prove them with a test.
+ You may ONLY hand off to the Validator when: every feature in the spec is fully implemented AND every clearing criterion in acceptance.md is met AND all tests pass with no failures.
+ If you cannot reach that bar, keep working — do not hand off incomplete work.
+ 
+diff --git a/prompts/champion/planner.md b/prompts/champion/planner.md
+index cad1614..87fefe2 100644
+--- a/prompts/champion/planner.md
++++ b/prompts/champion/planner.md
+@@ -1,11 +1,16 @@
+ You are the PLANNER in a long-running autonomous coding harness (think Claude Code with /loop).
++
++OPERATING MODE (read first): Match effort to the task. If the `.valinor/` harness files (brief.json, tasks.jsonl, handoff/*) do NOT exist, treat this as a single self-contained coding task — skip the status/journal/Kanban/autoresearch machinery and the multi-file reads below, and go straight to writing a tight spec whose every feature has an observable, testable success criterion. Spend wall-clock time only on work that advances a testable criterion: no open-ended repository sweeps and no ceremony files. The handoff contract (spec.md + acceptance.md) still applies in both modes.
++
++WRITE, DON'T PROMISE: your first concrete action is to WRITE the actual spec.md (and acceptance.md) files with their full content. Never end a turn having only said you "will" plan, will write criteria, or describing the spec in prose — an intent-only, empty, or unwritten spec is an automatic failure that leaves the Generator nothing to build and yields 0/0 tests downstream. Produce the files, then summarise.
++
+ Read .valinor/brief.json for the durable goal and constraints, .valinor/tasks.jsonl for the setup-generated or user-created task queue, .valinor/handoff/backlog.md for outstanding hypotheses/features, and .valinor/handoff/validation.md for the last verdict if present.
+ The task queue is binding input: every queued/todo setup or Kanban task is a user-visible objective/task that must either be planned into the current cycle, explicitly deferred with a reason in backlog.md, or marked complete only after Validator evidence exists. Do not ignore tasks.jsonl.
+ 
+ USER STEERING — HIGHEST PRIORITY: read .valinor/handoff/steer.md. Each line there is a direct message from the user. The most recent unaddressed message is a top-priority instruction that overrides backlog ordering — fold it into this plan immediately and acknowledge it in your summary. If a message was passed inline as 'Additional steering for this run', treat it as the user speaking to you right now.
+ 
+ Your standard is bounded, evidence-backed planning. Before you commit a plan you MUST:
+-1. Within the first 60 seconds, write .valinor/handoff/planner-status.md with: current objective, tasks being planned, files inspected, files intentionally skipped, blockers, and next output expected. Update it when your phase changes.
++1. In harness mode only (`.valinor/` present): within the first 60 seconds, write .valinor/handoff/planner-status.md with: current objective, tasks being planned, files inspected, files intentionally skipped, blockers, and next output expected; update it when your phase changes. In single-task mode, skip this and proceed straight to the plan.
+ 2. Research only what materially changes the current plan. Read real files and verify assumptions, but do not perform open-ended repository sweeps.
+ 3. Do not search dependency, generated, or build output directories, including node_modules, .next, dist, build, target, coverage, .git, and vendor directories. Inspect package/config files and app source first.
+ 4. Use web research only when the current task requires external facts that may have changed; otherwise produce the local plan immediately.
+@@ -17,6 +22,8 @@ SUCCESS CRITERIA CONTRACT:
+ - You MUST define planner-authored validation criteria while writing the plan, before Generator starts. Do not leave success definition to Generator or Validator.
+ - For each feature/task, include a `Success criteria` subsection in .valinor/handoff/spec.md and mirror the same checklist in .valinor/handoff/acceptance.md as the planner-authored validation criteria.
+ - Each success criterion must be observable and testable: name the exact behaviour, command, test, artifact, or UI state that proves completion.
++- COVER INTERACTIONS, NOT JUST ATOMS: when a feature's correctness depends on how multiple operations, rules, or inputs combine, specify the interaction semantics explicitly — precedence, associativity, evaluation order, and composition rules — and add at least one success criterion that exercises a COMBINED/composite input, not only isolated single-operation happy paths. Held-out tests probe these combinations, so an unspecified interaction is an automatic gap.
++- Pin the MODULE CONTRACT as an explicit, first success criterion whenever the deliverable is importable code: the exact public entrypoint path the tests will import (the package's conventional main — e.g. `src/index.js` — confirmed against package.json `main`/`exports` if present), the module system (ESM vs CommonJS), and the exact symbol names + signatures that must be exported. Tests import the public entrypoint by path, so an implementation that puts code elsewhere, uses the wrong module system, or exports a different shape loads as 0 tests no matter how correct the logic is. Make this contract unambiguous so the Generator builds to the path the tests expect.
+ - If you cannot define planner-authored validation criteria yet, narrow the feature or research more before writing the plan.
+ - When one experiment maps to existing queued tasks, write a `Related brief bets:` or `Related tasks:` line in .valinor/handoff/backlog.md with the exact task ids. The app uses that durable line to move Kanban cards through planned/doing/review/done.
+ 
+diff --git a/prompts/champion/validator.md b/prompts/champion/validator.md
+index 0c7690d..c96be58 100644
+--- a/prompts/champion/validator.md
++++ b/prompts/champion/validator.md
+@@ -1,4 +1,7 @@
+ You are the VALIDATOR in a long-running autonomous coding harness. You are deeply skeptical and hold a superb quality bar. Your job is to catch anything that diverges from the plan.
++
++OPERATING MODE (read first): Match effort to the task. If the `.valinor/` harness files do NOT exist, treat this as a single self-contained coding task — go straight to independently re-running the tests and checking every success criterion against the real code, then emit the VERDICT. Skip status/journal ceremony; never let it delay or dilute the verdict. Re-running the tests yourself is always mandatory.
++
+ Read BOTH sides of the contract: the Planner's plan (.valinor/handoff/spec.md) and planner-authored validation criteria (.valinor/handoff/acceptance.md), AND the Generator's output (.valinor/handoff/build-report.md plus the actual code and tests in the repository).
+ The planner-authored success criteria / validation criteria are the binding contract. A missing, vague, or untestable success criterion is a FAIL because Generator and Validator cannot prove completion without it.
+ 
+diff --git a/tests/test_forge_loop.py b/tests/test_forge_loop.py
+index 49a1077..91b2785 100644
+--- a/tests/test_forge_loop.py
++++ b/tests/test_forge_loop.py
+@@ -2,11 +2,30 @@ import os
+ import tempfile
+ import time
+ import unittest
++from unittest.mock import patch
+ from pathlib import Path
+ 
+-from forge.agent_cli import isolated_agent_env
+-from forge.experiment import required_outputs_missing, setup_valinor_dir
++from forge.agent_cli import AgentRun, _opencode_logged_error, isolated_agent_env
++from forge.dashboard import _HTML, _presentable_live
++from forge.experiment import (
++    BenchmarkResult,
++    ChampionPrompts,
++    ExperimentResult,
++    ROLE_HARD_GUARDRAILS,
++    ROLE_USER_KICKOFF,
++    RoleResult,
++    TestResult,
++    materialize_benchmark_workspace,
++    cleanup_planner_scope_leaks,
++    cap_auxiliary_handoff_files,
++    required_outputs_missing,
++    run_role,
++    run_one_benchmark,
++    setup_valinor_dir,
++)
+ from forge.progress import ProgressTracker
++from forge.quality import usable_journal_entries
++from forge.scorer import compute_score
+ 
+ 
+ class ForgeLoopTests(unittest.TestCase):
+@@ -21,7 +40,7 @@ class ForgeLoopTests(unittest.TestCase):
+ 
+             self.assertEqual(env["GIT_CEILING_DIRECTORIES"], str(bench.parent))
+             self.assertEqual(env["VALINOR_FORGE_BENCHMARK_ROOT"], str(bench))
+-            self.assertNotIn("VALINOR_PROJECT_ROOT", env)
++            self.assertEqual(env["VALINOR_PROJECT_ROOT"], str(bench))
+ 
+     def test_progress_tracker_reports_running_tokens(self) -> None:
+         tracker = ProgressTracker("exp-test", ["json-patch"], include_propose=False)
+@@ -50,3 +69,571 @@ class ForgeLoopTests(unittest.TestCase):
+             (bench / ".valinor" / "handoff" / "backlog.md").write_text("backlog", encoding="utf-8")
+ 
+             self.assertEqual(required_outputs_missing("planner", bench), [])
++
++    def test_workspace_materialization_excludes_agent_scratch(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            source = root / "benchmarks" / "sample"
++            source.mkdir(parents=True)
++            (source / "README.md").write_text("spec", encoding="utf-8")
++            (source / "package.json").write_text('{"type":"module"}', encoding="utf-8")
++            (source / ".valinor").mkdir()
++            (source / ".valinor" / "brief.json").write_text("stale", encoding="utf-8")
++            (source / ".opencode").mkdir()
++            (source / "src").mkdir()
++            (source / "src" / "index.js").write_text("stale generated code", encoding="utf-8")
++            (source / "tests" / "fixtures").mkdir(parents=True)
++            (source / "tests" / "generated.test.js").write_text("stale test", encoding="utf-8")
++            (source / "tests" / "fixtures" / "input.log").write_text("fixture", encoding="utf-8")
++
++            workspace = materialize_benchmark_workspace(source, root / "run" / "sample")
++
++            self.assertTrue((workspace / ".git").exists())
++            self.assertTrue((workspace / "README.md").exists())
++            self.assertFalse((workspace / ".valinor").exists())
++            self.assertFalse((workspace / ".opencode").exists())
++            self.assertFalse((workspace / "src" / "index.js").exists())
++            self.assertFalse((workspace / "tests" / "generated.test.js").exists())
++            self.assertTrue((workspace / "tests" / "fixtures" / "input.log").exists())
++
++    def test_zero_test_scores_are_not_optimization_signal(self) -> None:
++        exp = ExperimentResult(
++            exp_id="exp-zero",
++            started_at=0.0,
++            finished_at=10.0,
++            benchmarks=[
++                BenchmarkResult(
++                    benchmark="sample",
++                    cycles=1,
++                    verdict="fail",
++                    test=TestResult(0, 5, 5, raw_stdout="", raw_stderr="all failed"),
++                    roles=[],
++                )
++            ],
++        )
++
++        score = compute_score(exp, rubric_score=1.0)
++
++        self.assertEqual(score.total, 0.0)
++        self.assertEqual(score.tests, 0.0)
++        self.assertEqual(score.speed, 0.0)
++        self.assertEqual(score.rubric, 0.0)
++
++    def test_zero_test_entries_are_filtered_from_proposer_journal(self) -> None:
++        entries = [
++            {"exp_id": "bad", "breakdown": {"tests": 0.0}, "adopted": False},
++            {"exp_id": "good", "breakdown": {"tests": 0.25}, "adopted": False},
++        ]
++
++        self.assertEqual([e["exp_id"] for e in usable_journal_entries(entries)], ["good"])
++
++    def test_dashboard_keeps_expanded_experiment_across_poll(self) -> None:
++        self.assertIn("let openExpId", _HTML)
++        self.assertIn("detailCache", _HTML)
++        self.assertIn("appendDetailRow", _HTML)
++        self.assertNotIn("let openRow", _HTML)
++
++    def test_dashboard_filters_zero_test_history_from_stale_live_json(self) -> None:
++        live = _presentable_live({
++            "history": [
++                {"exp_id": "zero", "score": 0.9, "cost_usd": 1, "adopted": True, "breakdown": {"tests": 0}},
++                {"exp_id": "signal", "score": 0.4, "cost_usd": 2, "adopted": False, "breakdown": {"tests": 0.2}},
++            ],
++            "totals": {},
++        })
++
++        self.assertEqual([e["exp_id"] for e in live["history"]], ["signal"])
++        self.assertEqual(live["totals"]["experiments"], 1)
++        self.assertEqual(live["totals"]["adopted"], 0)
++        self.assertEqual(live["best_score"], 0.4)
++
++    def test_dashboard_exposes_stop_button_and_endpoint(self) -> None:
++        self.assertIn('id="stop-btn"', _HTML)
++        self.assertIn("stopForge", _HTML)
++        self.assertIn('fetch("/api/stop"', _HTML)
++
++    def test_generator_and_validator_receive_original_readme_contract(self) -> None:
++        self.assertIn("README.md", ROLE_USER_KICKOFF["generator"])
++        self.assertIn("README.md", ROLE_USER_KICKOFF["validator"])
++        self.assertIn("source of truth", ROLE_HARD_GUARDRAILS["generator"].lower())
++        self.assertIn("source of truth", ROLE_HARD_GUARDRAILS["validator"].lower())
++
++    def test_emulated_pass_runs_all_handoffs_and_scores_tests(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++        seen_roles: list[str] = []
++
++        def fake_run_role(role, prompts, bench_dir, exp_run_dir, on_progress=None, **_kwargs):
++            seen_roles.append(role)
++            handoff = bench_dir / ".valinor" / "handoff"
++            handoff.mkdir(parents=True, exist_ok=True)
++            if role == "planner":
++                (handoff / "spec.md").write_text("Implement task API module contract.", encoding="utf-8")
++                (handoff / "acceptance.md").write_text("All CRUD, validation, and routing cases pass.", encoding="utf-8")
++                (handoff / "backlog.md").write_text("T-1 task API implementation.", encoding="utf-8")
++                artifact = "spec"
++                final = "Planner wrote spec, acceptance, and backlog."
++            elif role == "generator":
++                src = bench_dir / "src"
++                src.mkdir(exist_ok=True)
++                (src / "index.js").write_text(TASK_API_PASSING_IMPLEMENTATION, encoding="utf-8")
++                (handoff / "build-report.md").write_text("npm test passes for task-api.", encoding="utf-8")
++                artifact = "build"
++                final = "Generator implemented src/index.js and wrote build report."
++            else:
++                (handoff / "validation.md").write_text("VERDICT: PASS\nAll task-api checks pass.", encoding="utf-8")
++                artifact = "validation"
++                final = "VERDICT: PASS\nValidator independently accepted the implementation."
++            if on_progress:
++                on_progress(10 * len(seen_roles))
++            return RoleResult(
++                role=role,
++                session_id=f"fake-{role}",
++                exit_code=0,
++                wall_seconds=0.01,
++                final_message=final,
++                artifact=artifact,
++                tokens_out=10,
++            )
++
++        with tempfile.TemporaryDirectory() as tmp, patch("forge.experiment.run_role", fake_run_role):
++            result = run_one_benchmark("task-api", prompts, Path(tmp) / "exp-pass")
++
++        self.assertEqual(seen_roles, ["planner", "generator", "validator"])
++        self.assertEqual(result.verdict, "pass")
++        self.assertGreater(result.test.total, 0)
++        self.assertEqual(result.test.failed, 0)
++        self.assertEqual(result.test.passed, result.test.total)
++
++    def test_held_out_test_failures_override_validator_pass_verdict(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++
++        def fake_run_role(role, prompts, bench_dir, exp_run_dir, on_progress=None, **_kwargs):
++            handoff = bench_dir / ".valinor" / "handoff"
++            handoff.mkdir(parents=True, exist_ok=True)
++            if role == "planner":
++                (handoff / "spec.md").write_text("spec", encoding="utf-8")
++                (handoff / "acceptance.md").write_text("acceptance", encoding="utf-8")
++                (handoff / "backlog.md").write_text("backlog", encoding="utf-8")
++                return RoleResult(role=role, session_id="planner", exit_code=0, wall_seconds=0.01, final_message="", artifact="spec")
++            if role == "generator":
++                src = bench_dir / "src"
++                src.mkdir(exist_ok=True)
++                (src / "index.js").write_text("export function createStore(){}; export function handleRequest(){};", encoding="utf-8")
++                (handoff / "build-report.md").write_text("build", encoding="utf-8")
++                return RoleResult(role=role, session_id="generator", exit_code=0, wall_seconds=0.01, final_message="", artifact="build")
++            (handoff / "validation.md").write_text("VERDICT: PASS\nstatic pass", encoding="utf-8")
++            return RoleResult(role=role, session_id="validator", exit_code=0, wall_seconds=0.01, final_message="VERDICT: PASS\nstatic pass", artifact="validation")
++
++        failing_test = TestResult(10, 11, 21, raw_stdout="", raw_stderr="held-out failures")
++        with (
++            tempfile.TemporaryDirectory() as tmp,
++            patch("forge.experiment.run_role", fake_run_role),
++            patch("forge.experiment.run_tests", return_value=failing_test),
++        ):
++            result = run_one_benchmark("task-api", prompts, Path(tmp) / "exp-hidden-fail")
++
++        self.assertEqual(result.verdict, "fail")
++        self.assertEqual(result.test.failed, 11)
++
++    def test_missing_planner_backlog_gets_same_role_repair_before_blocking(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++        seen_calls: list[tuple[str, str | None]] = []
++
++        def fake_run_role(role, prompts, bench_dir, exp_run_dir, on_progress=None, attempt_label=None, user_message=None):
++            seen_calls.append((role, attempt_label))
++            handoff = bench_dir / ".valinor" / "handoff"
++            handoff.mkdir(parents=True, exist_ok=True)
++            if role == "planner" and attempt_label is None:
++                (handoff / "spec.md").write_text("spec", encoding="utf-8")
++                (handoff / "acceptance.md").write_text("acceptance", encoding="utf-8")
++                return RoleResult(role=role, session_id="planner-1", exit_code=0, wall_seconds=0.01, final_message="planner", artifact="spec")
++            if role == "planner":
++                self.assertIn(".valinor/handoff/backlog.md", user_message or "")
++                (handoff / "backlog.md").write_text("backlog", encoding="utf-8")
++                return RoleResult(role=role, session_id="planner-repair", exit_code=0, wall_seconds=0.01, final_message="planner repair", artifact="spec")
++            if role == "generator":
++                src = bench_dir / "src"
++                src.mkdir(exist_ok=True)
++                (src / "index.js").write_text(TASK_API_PASSING_IMPLEMENTATION, encoding="utf-8")
++                (handoff / "build-report.md").write_text("build", encoding="utf-8")
++                return RoleResult(role=role, session_id="generator", exit_code=0, wall_seconds=0.01, final_message="generator", artifact="build")
++            (handoff / "validation.md").write_text("VERDICT: PASS\nok", encoding="utf-8")
++            return RoleResult(role=role, session_id="validator", exit_code=0, wall_seconds=0.01, final_message="VERDICT: PASS\nok", artifact="validation")
++
++        with tempfile.TemporaryDirectory() as tmp, patch("forge.experiment.run_role", fake_run_role):
++            result = run_one_benchmark("task-api", prompts, Path(tmp) / "exp-repair")
++
++        self.assertEqual(seen_calls, [
++            ("planner", None),
++            ("planner", "repair1"),
++            ("generator", None),
++            ("validator", None),
++        ])
++        self.assertNotIn("missing required output", result.test.raw_stderr)
++        self.assertEqual(result.verdict, "pass")
++
++    def test_missing_generator_build_report_is_recovered_before_validator(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++        seen_calls: list[tuple[str, str | None]] = []
++
++        def fake_run_role(role, prompts, bench_dir, exp_run_dir, on_progress=None, attempt_label=None, user_message=None):
++            seen_calls.append((role, attempt_label))
++            handoff = bench_dir / ".valinor" / "handoff"
++            handoff.mkdir(parents=True, exist_ok=True)
++            if role == "planner":
++                (handoff / "spec.md").write_text("spec", encoding="utf-8")
++                (handoff / "acceptance.md").write_text("acceptance", encoding="utf-8")
++                (handoff / "backlog.md").write_text("backlog", encoding="utf-8")
++                return RoleResult(role=role, session_id="planner", exit_code=0, wall_seconds=0.01, final_message="planner", artifact="spec")
++            if role == "generator":
++                src = bench_dir / "src"
++                src.mkdir(exist_ok=True)
++                (src / "index.js").write_text(TASK_API_PASSING_IMPLEMENTATION, encoding="utf-8")
++                return RoleResult(role=role, session_id="generator", exit_code=0, wall_seconds=0.01, final_message="", artifact=None)
++            build_report = (handoff / "build-report.md").read_text(encoding="utf-8")
++            self.assertIn("Forge Recovery", build_report)
++            (handoff / "validation.md").write_text("VERDICT: PASS\nok", encoding="utf-8")
++            return RoleResult(role=role, session_id="validator", exit_code=0, wall_seconds=0.01, final_message="VERDICT: PASS\nok", artifact="validation")
++
++        def fake_recover(bench_dir):
++            report = bench_dir / ".valinor" / "handoff" / "build-report.md"
++            report.write_text("# Build Report - Forge Recovery\n", encoding="utf-8")
++            return RoleResult(
++                role="generator",
++                session_id=None,
++                exit_code=0,
++                wall_seconds=0.01,
++                final_message="Forge recovery wrote build report.",
++                artifact=report.read_text(encoding="utf-8"),
++            )
++
++        with (
++            tempfile.TemporaryDirectory() as tmp,
++            patch("forge.experiment.run_role", fake_run_role),
++            patch("forge.experiment.recover_missing_generator_report", fake_recover),
++        ):
++            result = run_one_benchmark("task-api", prompts, Path(tmp) / "exp-generator-recovery")
++
++        self.assertEqual(seen_calls, [
++            ("planner", None),
++            ("generator", None),
++            ("generator", "repair1"),
++            ("validator", None),
++        ])
++        self.assertEqual(result.verdict, "pass")
++        self.assertEqual(result.test.failed, 0)
++
++    def test_failed_generator_recovery_skips_validator_and_scores_generated_code(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++        seen_roles: list[str] = []
++
++        def fake_run_role(role, prompts, bench_dir, exp_run_dir, on_progress=None, attempt_label=None, user_message=None):
++            seen_roles.append(role)
++            handoff = bench_dir / ".valinor" / "handoff"
++            handoff.mkdir(parents=True, exist_ok=True)
++            if role == "planner":
++                (handoff / "spec.md").write_text("spec", encoding="utf-8")
++                (handoff / "acceptance.md").write_text("acceptance", encoding="utf-8")
++                (handoff / "backlog.md").write_text("backlog", encoding="utf-8")
++                return RoleResult(role=role, session_id="planner", exit_code=0, wall_seconds=0.01, final_message="", artifact="spec")
++            if role == "generator":
++                src = bench_dir / "src"
++                src.mkdir(exist_ok=True)
++                (src / "index.js").write_text("export function createStore(){}; export function handleRequest(){};", encoding="utf-8")
++                return RoleResult(
++                    role=role,
++                    session_id="generator",
++                    exit_code=None,
++                    wall_seconds=0.01,
++                    final_message="",
++                    artifact=None,
++                    error="timeout after 900s",
++                )
++            self.fail("validator should not run after failed generator recovery")
++
++        recovery = RoleResult(
++            role="generator",
++            session_id=None,
++            exit_code=1,
++            wall_seconds=0.01,
++            final_message="Forge recovery found failing visible tests.",
++            artifact="recovery",
++        )
++        failing_test = TestResult(1, 2, 3, raw_stdout="", raw_stderr="generated code failed")
++        with (
++            tempfile.TemporaryDirectory() as tmp,
++            patch("forge.experiment.run_role", fake_run_role),
++            patch("forge.experiment.recover_missing_generator_report", return_value=recovery),
++            patch("forge.experiment.run_tests", return_value=failing_test),
++        ):
++            result = run_one_benchmark("task-api", prompts, Path(tmp) / "exp-generator-fail")
++
++        self.assertEqual(seen_roles, ["planner", "generator"])
++        self.assertEqual(result.verdict, "fail")
++        self.assertEqual(result.test.total, 3)
++
++    def test_missing_validator_report_is_recovered_before_scoring(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++        seen_calls: list[str] = []
++
++        def fake_run_role(role, prompts, bench_dir, exp_run_dir, on_progress=None, attempt_label=None, user_message=None):
++            seen_calls.append(role)
++            handoff = bench_dir / ".valinor" / "handoff"
++            handoff.mkdir(parents=True, exist_ok=True)
++            if role == "planner":
++                (handoff / "spec.md").write_text("spec", encoding="utf-8")
++                (handoff / "acceptance.md").write_text("acceptance", encoding="utf-8")
++                (handoff / "backlog.md").write_text("backlog", encoding="utf-8")
++                return RoleResult(role=role, session_id="planner", exit_code=0, wall_seconds=0.01, final_message="planner", artifact="spec")
++            if role == "generator":
++                src = bench_dir / "src"
++                src.mkdir(exist_ok=True)
++                (src / "index.js").write_text(TASK_API_PASSING_IMPLEMENTATION, encoding="utf-8")
++                (handoff / "build-report.md").write_text("build", encoding="utf-8")
++                return RoleResult(role=role, session_id="generator", exit_code=0, wall_seconds=0.01, final_message="generator", artifact="build")
++            return RoleResult(
++                role=role,
++                session_id="validator",
++                exit_code=0,
++                wall_seconds=0.01,
++                final_message="",
++                artifact=None,
++                error="Context size has been exceeded",
++            )
++
++        with tempfile.TemporaryDirectory() as tmp, patch("forge.experiment.run_role", fake_run_role):
++            result = run_one_benchmark("task-api", prompts, Path(tmp) / "exp-validator-recovery")
++
++        self.assertEqual(seen_calls, ["planner", "generator", "validator", "validator"])
++        self.assertEqual(result.test.failed, 0)
++        self.assertTrue(any(r.role == "validator" and "Forge Recovery" in (r.artifact or "") for r in result.roles))
++
++    def test_planner_scope_leaks_are_removed_before_generator(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            bench = Path(tmp)
++            (bench / "src").mkdir()
++            (bench / "src" / "index.js").write_text("planner source", encoding="utf-8")
++            (bench / "tests").mkdir()
++            (bench / "tests" / "planner.test.js").write_text("planner test", encoding="utf-8")
++            (bench / "bin").mkdir()
++            (bench / "bin" / "tool.js").write_text("planner bin", encoding="utf-8")
++            setup_valinor_dir(bench, "brief")
++
++            removed = cleanup_planner_scope_leaks(bench)
++
++            self.assertEqual(set(removed), {"src", "tests", "bin"})
++            self.assertFalse((bench / "src").exists())
++            self.assertFalse((bench / "tests").exists())
++            self.assertFalse((bench / "bin").exists())
++            self.assertTrue((bench / ".valinor" / "handoff").exists())
++
++    def test_runaway_auxiliary_handoff_files_are_capped(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            bench = Path(tmp)
++            setup_valinor_dir(bench, "brief")
++            summary = bench / ".valinor" / "handoff" / "summaries.md"
++            summary.write_text("x" * 300_000 + "\nLATEST", encoding="utf-8")
++
++            capped = cap_auxiliary_handoff_files(bench)
++
++            self.assertEqual(capped, [".valinor/handoff/summaries.md"])
++            self.assertLess(summary.stat().st_size, 200_000)
++            self.assertIn("LATEST", summary.read_text(encoding="utf-8"))
++
++    def test_runaway_auxiliary_handoff_cap_does_not_read_entire_file(self) -> None:
++        original_read_text = Path.read_text
++        with tempfile.TemporaryDirectory() as tmp:
++            bench = Path(tmp)
++            setup_valinor_dir(bench, "brief")
++            summary = bench / ".valinor" / "handoff" / "summaries.md"
++            summary.write_text("x" * 300_000 + "\nLATEST", encoding="utf-8")
++
++            def fail_if_summary_read(path_self, *args, **kwargs):
++                if Path(path_self).name == "summaries.md":
++                    raise AssertionError("compaction must not read the whole runaway file")
++                return original_read_text(path_self, *args, **kwargs)
++
++            with patch.object(Path, "read_text", fail_if_summary_read):
++                capped = cap_auxiliary_handoff_files(bench)
++
++            self.assertEqual(capped, [".valinor/handoff/summaries.md"])
++            self.assertLess(summary.stat().st_size, 200_000)
++            self.assertIn("LATEST", summary.read_text(encoding="utf-8"))
++
++    def test_run_role_compacts_auxiliary_handoff_before_agent_context(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++        with tempfile.TemporaryDirectory() as tmp:
++            bench = Path(tmp) / "bench"
++            bench.mkdir()
++            setup_valinor_dir(bench, "brief")
++            summary = bench / ".valinor" / "handoff" / "summaries.md"
++            summary.write_text("x" * 300_000 + "\nLATEST", encoding="utf-8")
++
++            def fake_run_agent(**kwargs):
++                live_summary = kwargs["work_dir"] / ".valinor" / "handoff" / "summaries.md"
++                self.assertLess(live_summary.stat().st_size, 200_000)
++                return AgentRun(
++                    final_text="planner done",
++                    num_turns=1,
++                    cost_usd=0.0,
++                    is_error=False,
++                    session_id="fake",
++                    exit_code=0,
++                    wall_seconds=0.01,
++                    tokens_out=1,
++                )
++
++            with patch("forge.experiment.run_agent", fake_run_agent):
++                result = run_role("planner", prompts, bench, Path(tmp) / "run")
++
++            self.assertIsNone(result.error)
++            self.assertIn("LATEST", summary.read_text(encoding="utf-8"))
++
++    def test_opencode_context_error_is_reported_from_log(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            log = Path(tmp) / "agent.log"
++            log.write_text('{"type":"error","error":{"data":{"message":"Context size has been exceeded."}}}', encoding="utf-8")
++
++            self.assertEqual(_opencode_logged_error(log), "Context size has been exceeded")
++
++    def test_context_overflow_triggers_compact_same_role_repair(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++        seen_calls: list[tuple[str, str | None]] = []
++
++        def fake_run_role(role, prompts, bench_dir, exp_run_dir, on_progress=None, attempt_label=None, user_message=None):
++            seen_calls.append((role, attempt_label))
++            handoff = bench_dir / ".valinor" / "handoff"
++            handoff.mkdir(parents=True, exist_ok=True)
++            if role == "planner" and attempt_label is None:
++                return RoleResult(
++                    role=role,
++                    session_id="planner",
++                    exit_code=0,
++                    wall_seconds=0.01,
++                    final_message="",
++                    artifact=None,
++                    error="Context size has been exceeded",
++                )
++            if role == "planner":
++                self.assertEqual(attempt_label, "compact1")
++                self.assertIn("COMPACT REPAIR", user_message or "")
++                (handoff / "spec.md").write_text("spec", encoding="utf-8")
++                (handoff / "acceptance.md").write_text("acceptance", encoding="utf-8")
++                (handoff / "backlog.md").write_text("backlog", encoding="utf-8")
++                return RoleResult(role=role, session_id="planner-compact", exit_code=0, wall_seconds=0.01, final_message="planner compact", artifact="spec")
++            if role == "generator":
++                src = bench_dir / "src"
++                src.mkdir(exist_ok=True)
++                (src / "index.js").write_text(TASK_API_PASSING_IMPLEMENTATION, encoding="utf-8")
++                (handoff / "build-report.md").write_text("build", encoding="utf-8")
++                return RoleResult(role=role, session_id="generator", exit_code=0, wall_seconds=0.01, final_message="generator", artifact="build")
++            (handoff / "validation.md").write_text("VERDICT: PASS\nok", encoding="utf-8")
++            return RoleResult(role=role, session_id="validator", exit_code=0, wall_seconds=0.01, final_message="VERDICT: PASS\nok", artifact="validation")
++
++        with tempfile.TemporaryDirectory() as tmp, patch("forge.experiment.run_role", fake_run_role):
++            result = run_one_benchmark("task-api", prompts, Path(tmp) / "exp-compact")
++
++        self.assertEqual(seen_calls[:2], [("planner", None), ("planner", "compact1")])
++        self.assertEqual(result.test.failed, 0)
++
++    def test_context_overflow_after_complete_handoff_does_not_rewrite_outputs(self) -> None:
++        prompts = ChampionPrompts(planner="planner", generator="generator", validator="validator")
++        seen_calls: list[tuple[str, str | None]] = []
++
++        def fake_run_role(role, prompts, bench_dir, exp_run_dir, on_progress=None, attempt_label=None, user_message=None):
++            seen_calls.append((role, attempt_label))
++            handoff = bench_dir / ".valinor" / "handoff"
++            handoff.mkdir(parents=True, exist_ok=True)
++            if role == "planner":
++                self.assertIsNone(attempt_label)
++                (handoff / "spec.md").write_text("task-api spec with req.path contract", encoding="utf-8")
++                (handoff / "acceptance.md").write_text("task-api acceptance", encoding="utf-8")
++                (handoff / "backlog.md").write_text("task-api backlog", encoding="utf-8")
++                return RoleResult(
++                    role=role,
++                    session_id="planner",
++                    exit_code=0,
++                    wall_seconds=0.01,
++                    final_message="",
++                    artifact="spec",
++                    error="Context size has been exceeded",
++                )
++            if role == "generator":
++                self.assertIn("task-api spec", (handoff / "spec.md").read_text(encoding="utf-8"))
++                src = bench_dir / "src"
++                src.mkdir(exist_ok=True)
++                (src / "index.js").write_text(TASK_API_PASSING_IMPLEMENTATION, encoding="utf-8")
++                (handoff / "build-report.md").write_text("build", encoding="utf-8")
++                return RoleResult(role=role, session_id="generator", exit_code=0, wall_seconds=0.01, final_message="", artifact="build")
++            (handoff / "validation.md").write_text("VERDICT: PASS\nok", encoding="utf-8")
++            return RoleResult(role=role, session_id="validator", exit_code=0, wall_seconds=0.01, final_message="VERDICT: PASS\nok", artifact="validation")
++
++        with tempfile.TemporaryDirectory() as tmp, patch("forge.experiment.run_role", fake_run_role):
++            result = run_one_benchmark("task-api", prompts, Path(tmp) / "exp-complete-overflow")
++
++        self.assertEqual(seen_calls, [("planner", None), ("generator", None), ("validator", None)])
++        self.assertEqual(result.test.failed, 0)
++
++
++TASK_API_PASSING_IMPLEMENTATION = r"""
++export function createStore() {
++  return { tasks: [], nextId: 1 };
++}
++
++function response(status, body = null) {
++  return { status, body };
++}
++
++function parseTaskId(path) {
++  const match = /^\/tasks\/(\d+)$/.exec(path);
++  return match ? Number(match[1]) : null;
++}
++
++function validTitle(title) {
++  return typeof title === "string" && title.length > 0;
++}
++
++function validDone(done) {
++  return done === undefined || typeof done === "boolean";
++}
++
++export function handleRequest(req, store) {
++  const method = req?.method;
++  const path = req?.path;
++  const body = req?.body || {};
++
++  if (path === "/tasks") {
++    if (method === "POST") {
++      if (!validTitle(body.title) || !validDone(body.done)) return response(400);
++      const task = { id: store.nextId++, title: body.title, done: body.done ?? false };
++      store.tasks.push(task);
++      return response(201, { ...task });
++    }
++    if (method === "GET") {
++      return response(200, store.tasks.map((task) => ({ ...task })));
++    }
++    return response(405);
++  }
++
++  const id = parseTaskId(path);
++  if (id == null) return response(404);
++  const idx = store.tasks.findIndex((task) => task.id === id);
++  if (idx < 0) {
++    return ["GET", "PUT", "DELETE"].includes(method) ? response(404) : response(405);
++  }
++  const task = store.tasks[idx];
++  if (method === "GET") return response(200, { ...task });
++  if (method === "PUT") {
++    if (body.title !== undefined && !validTitle(body.title)) return response(400);
++    if (!validDone(body.done)) return response(400);
++    if (body.title !== undefined) task.title = body.title;
++    if (body.done !== undefined) task.done = body.done;
++    return response(200, { ...task });
++  }
++  if (method === "DELETE") {
++    store.tasks.splice(idx, 1);
++    return response(204);
++  }
++  return response(405);
++}
++"""

@@ -1,0 +1,10 @@
+﻿
+
+Id          : 39788
+ProcessName : python3.13
+StartTime   : 5/28/2026 2:56:41 PM
+Path        : C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\python3.13.exe
+
+
+
+

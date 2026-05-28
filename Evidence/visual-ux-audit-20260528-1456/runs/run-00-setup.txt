@@ -1,0 +1,3 @@
+﻿Audit folder: C:\Users\ivang\Desktop\coding_projects\valinor-prompt-forge\Evidence\visual-ux-audit-20260528-1456
+Coverage mode: Full Baseline
+Baseline: 

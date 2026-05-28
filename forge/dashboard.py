@@ -19,6 +19,26 @@ import json
 
 from .config import CONFIG
 from . import state
+from .quality import entry_has_positive_tests
+
+
+def _presentable_live(raw: dict) -> dict:
+    """Normalize old live snapshots for display.
+
+    The optimizer now discards zero-test experiments, but a dashboard may read a
+    live.json written by an older process. Filter here so refresh/restart makes
+    the UI consistent immediately.
+    """
+    out = dict(raw)
+    history = [e for e in out.get("history", []) if entry_has_positive_tests(e)]
+    out["history"] = history
+    totals = dict(out.get("totals") or {})
+    totals["experiments"] = len(history)
+    totals["adopted"] = sum(1 for e in history if e.get("adopted"))
+    totals["cost_usd"] = round(sum(float(e.get("cost_usd", 0.0) or 0.0) for e in history), 4)
+    out["totals"] = totals
+    out["best_score"] = max((float(e.get("score", 0.0) or 0.0) for e in history), default=0.0)
+    return out
 
 
 def _build_app():
@@ -38,7 +58,8 @@ def _build_app():
 
     @app.get("/api/live")
     def live() -> JSONResponse:
-        return JSONResponse(state.read_live() or {"status": "idle", "status_detail": "no run yet"})
+        raw = state.read_live() or {"status": "idle", "status_detail": "no run yet"}
+        return JSONResponse(_presentable_live(raw))
 
     @app.get("/api/journal")
     def journal() -> JSONResponse:
@@ -58,6 +79,11 @@ def _build_app():
         if rationale.exists():
             out["rationale"] = rationale.read_text(encoding="utf-8")
         return JSONResponse(out)
+
+    @app.post("/api/stop")
+    def stop() -> JSONResponse:
+        state.request_stop()
+        return JSONResponse({"ok": True, "lock_holder": state.lock_holder()})
 
     return app
 
@@ -100,6 +126,11 @@ _HTML = """<!doctype html>
   h1 small { color:var(--muted); font-weight:400; font-size:13px; }
   .badge { padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600;
            text-transform:uppercase; letter-spacing:.5px; }
+  button { background:#21262d; color:var(--fg); border:1px solid var(--border);
+           border-radius:7px; padding:6px 10px; font:inherit; cursor:pointer; }
+  button:hover { border-color:#8b949e; }
+  button.danger { color:#ffb4ab; border-color:rgba(248,81,73,.5); }
+  button.danger:disabled { opacity:.55; cursor:default; }
   .b-running { background:rgba(88,166,255,.15); color:var(--accent); }
   .b-proposing { background:rgba(210,153,34,.15); color:var(--warn); }
   .b-judging { background:rgba(210,153,34,.15); color:var(--warn); }
@@ -161,6 +192,7 @@ _HTML = """<!doctype html>
 <header>
   <h1>valinor-prompt-forge <small id="cfg"></small></h1>
   <span id="badge" class="badge b-idle">idle</span>
+  <button id="stop-btn" class="danger" type="button" onclick="stopForge()">Stop</button>
   <span id="detail" class="detail"></span>
   <span id="elapsed" class="detail"></span>
 </header>
@@ -190,7 +222,8 @@ _HTML = """<!doctype html>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
-let openRow = null;
+let openExpId = null;
+const detailCache = new Map();
 let LAST = null;  // most recent live snapshot, for the client-side clock
 
 // Ticks every second independent of server updates, so a long-running phase
@@ -318,20 +351,29 @@ function renderRows(hist){
       + `<td class="num">${fmt(bd.rubric,2)}</td>`
       + `<td class="${e.adopted?'adopt':'disc'}">${e.adopted?'✓ adopted':'·'}</td>`
       + `<td>${(e.hypothesis||"").slice(0,90)}</td>`;
-    tr.onclick = ()=>toggleDetail(tr, e.exp_id);
+    tr.onclick = ()=>toggleDetail(e.exp_id);
     rows.appendChild(tr);
+    if(e.exp_id === openExpId){
+      appendDetailRow(tr, e.exp_id);
+    }
   });
 }
 
-async function toggleDetail(tr, expId){
-  if(tr.nextSibling && tr.nextSibling.classList && tr.nextSibling.classList.contains("detailrow")){
-    tr.nextSibling.remove(); return;
-  }
-  document.querySelectorAll(".detailrow").forEach(r=>r.remove());
+function appendDetailRow(tr, expId){
   const det = document.createElement("tr");
   det.className = "detailrow";
-  det.innerHTML = `<td colspan="7">loading ${expId}…</td>`;
+  const cached = detailCache.get(expId);
+  det.innerHTML = `<td colspan="7">${cached || `loading ${expId}...`}</td>`;
   tr.after(det);
+  if(!cached) loadDetail(expId, det);
+}
+
+async function toggleDetail(expId){
+  openExpId = (openExpId === expId) ? null : expId;
+  renderRows((LAST && LAST.history) || []);
+}
+
+async function loadDetail(expId, det){
   try{
     const r = await fetch("/api/experiment/"+expId); const d = await r.json();
     let txt = "";
@@ -342,8 +384,30 @@ async function toggleDetail(tr, expId){
           + `time=${fmt(b.wall_seconds,0)}s cost=$${fmt(b.cost_usd,2)}\\n`;
       });
     }
-    det.innerHTML = `<td colspan="7">${(txt||"(no detail)").replace(/</g,"&lt;")}</td>`;
-  }catch(err){ det.innerHTML = `<td colspan="7">error: ${err}</td>`; }
+    const safe = (txt||"(no detail)").replace(/</g,"&lt;");
+    detailCache.set(expId, safe);
+    if(openExpId === expId){
+      det.innerHTML = `<td colspan="7">${safe}</td>`;
+    }
+  }catch(err){
+    const safe = `error: ${err}`.replace(/</g,"&lt;");
+    detailCache.set(expId, safe);
+    if(openExpId === expId) det.innerHTML = `<td colspan="7">${safe}</td>`;
+  }
+}
+
+async function stopForge(){
+  const btn = $("stop-btn");
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/stop", {method:"POST"});
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    $("detail").textContent = "stop requested; active role will be terminated";
+    await tick();
+  }catch(err){
+    $("detail").textContent = "stop request failed: " + err;
+    btn.disabled = false;
+  }
 }
 
 function renderBenchmarks(s){
